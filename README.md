@@ -37,6 +37,7 @@ Add Windows directories, check SSH, then press **Передать**. Settings ar
 
 ## Notes
 
+- The UI supports Russian and English. Use the language selector in the top-right corner.
 - Login can use either the Steam Deck user password or a private SSH key.
 - Passwords are not saved in the config file.
 - Transfers use SFTP; if a remote file already exists, DeckShare skips it instead of overwriting it.
