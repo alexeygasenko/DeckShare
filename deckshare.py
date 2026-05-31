@@ -60,7 +60,8 @@ TRANSLATIONS = {
         "log_connecting": "Подключаюсь к {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Обрабатываю папку: {name}",
         "log_skipped": "Пропущен, уже есть: {path}",
-        "log_uploaded": "Отправлен: {path}",
+        "log_uploaded": "Отправлен: {path} - 100% - {speed}",
+        "log_uploading": "Передается: {path} - {percent}% - {speed}",
         "passphrase": "Фраза ключа",
         "password": "Пароль",
         "port": "Порт",
@@ -114,7 +115,8 @@ TRANSLATIONS = {
         "log_connecting": "Connecting to {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Processing folder: {name}",
         "log_skipped": "Skipped, already exists: {path}",
-        "log_uploaded": "Uploaded: {path}",
+        "log_uploaded": "Uploaded: {path} - 100% - {speed}",
+        "log_uploading": "Uploading: {path} - {percent}% - {speed}",
         "passphrase": "Key passphrase",
         "password": "Password",
         "port": "Port",
@@ -141,6 +143,26 @@ def translate_text(language: str, key: str, **kwargs: object) -> str:
     bundle = TRANSLATIONS.get(language, TRANSLATIONS[LANG_RU])
     text = bundle.get(key, TRANSLATIONS[LANG_RU].get(key, key))
     return text.format(**kwargs)
+
+
+def format_transfer_speed(bytes_per_second: float) -> str:
+    units = ("B/s", "KB/s", "MB/s", "GB/s")
+    value = max(bytes_per_second, 0.0)
+    unit_index = 0
+    while value >= 1024 and unit_index < len(units) - 1:
+        value /= 1024
+        unit_index += 1
+
+    if unit_index == 0:
+        return f"{value:.0f} {units[unit_index]}"
+    return f"{value:.1f} {units[unit_index]}"
+
+
+def format_transfer_percent(sent_bytes: int, total_bytes: int) -> str:
+    if total_bytes <= 0:
+        return "100.0" if sent_bytes else "0.0"
+    percent = min((sent_bytes / total_bytes) * 100, 100)
+    return f"{percent:.1f}"
 
 
 def app_config_path() -> Path:
@@ -459,9 +481,32 @@ class SftpRunner:
                     self._emit("output", self.tr("log_skipped", path=remote_file))
                     continue
 
-                self.sftp.put(str(local_file), remote_file)
+                started_at = time.monotonic()
+                last_progress_at = 0.0
+                file_size = local_file.stat().st_size
+
+                def progress_callback(sent_bytes: int, total_bytes: int) -> None:
+                    nonlocal last_progress_at
+                    now = time.monotonic()
+                    total = total_bytes or file_size
+                    if now - last_progress_at < 1 and sent_bytes < total:
+                        return
+
+                    elapsed = max(now - started_at, 0.001)
+                    speed = format_transfer_speed(sent_bytes / elapsed)
+                    percent = format_transfer_percent(sent_bytes, total)
+                    self._emit(
+                        "progress",
+                        self.tr("log_uploading", path=remote_file, percent=percent, speed=speed),
+                    )
+                    last_progress_at = now
+
+                progress_callback(0, file_size)
+                self.sftp.put(str(local_file), remote_file, callback=progress_callback)
                 uploaded += 1
-                self._emit("output", self.tr("log_uploaded", path=remote_file))
+                elapsed = max(time.monotonic() - started_at, 0.001)
+                speed = format_transfer_speed(file_size / elapsed)
+                self._emit("output", self.tr("log_uploaded", path=remote_file, speed=speed))
 
         return uploaded, skipped
 
@@ -900,6 +945,9 @@ class DeckShareApp(ttk.Frame):
                     self.stop_button.configure(state="disabled")
                     self.progress.stop()
                     self.status_var.set(text)
+                elif level == "progress":
+                    self.status_var.set(text)
+                    self.append_log("output", text)
                 else:
                     self.append_log(level, text)
         except queue.Empty:
