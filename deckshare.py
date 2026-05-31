@@ -14,6 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 
 
 APP_NAME = "DeckShare"
+KEYRING_SERVICE = APP_NAME
 DEFAULT_REMOTE_PATH = "/home/deck/DeckShare"
 AUTH_PASSWORD = "password"
 AUTH_KEY = "key"
@@ -44,6 +45,9 @@ TRANSLATIONS = {
         "error_missing_folder": "Папка недоступна: {source}",
         "error_no_password": "Введите пароль пользователя Steam Deck.",
         "error_no_sources": "Не выбраны директории для передачи.",
+        "error_keyring_missing": "Не установлен пакет keyring. Запустите install_requirements.bat.",
+        "error_keyring_read_failed": "Не удалось прочитать сохраненный пароль: {error}",
+        "error_keyring_save_failed": "Не удалось сохранить пароль: {error}",
         "error_paramiko_missing": "Не установлен пакет paramiko. Запустите install_requirements.bat.",
         "error_port_number": "Порт должен быть числом.",
         "error_port_range": "Порт должен быть в диапазоне 1-65535.",
@@ -59,6 +63,9 @@ TRANSLATIONS = {
         "language": "Язык",
         "log_connecting": "Подключаюсь к {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Обрабатываю папку: {name}",
+        "log_password_deleted": "Сохраненный пароль удален.",
+        "log_password_loaded": "Сохраненный пароль загружен из системного хранилища.",
+        "log_password_saved": "Пароль сохранен в системном хранилище.",
         "log_skipped": "Пропущен, уже есть: {path}",
         "log_uploaded": "Отправлен: {path} - 100% - {speed}",
         "log_uploading": "Передается: {path} - {percent}% - {speed}",
@@ -69,6 +76,7 @@ TRANSLATIONS = {
         "remote_path_default": "Путь на Deck по умолчанию",
         "remove": "Удалить",
         "selected_remote_path": "Путь на Deck для выбранной папки",
+        "save_password": "Сохранить пароль безопасно",
         "status_ready": "Готово",
         "status_stopping": "Останавливаю...",
         "status_testing": "Проверяю SSH...",
@@ -99,6 +107,9 @@ TRANSLATIONS = {
         "error_missing_folder": "Folder is not available: {source}",
         "error_no_password": "Enter the Steam Deck user password.",
         "error_no_sources": "No directories selected for transfer.",
+        "error_keyring_missing": "The keyring package is not installed. Run install_requirements.bat.",
+        "error_keyring_read_failed": "Could not read the saved password: {error}",
+        "error_keyring_save_failed": "Could not save the password: {error}",
         "error_paramiko_missing": "The paramiko package is not installed. Run install_requirements.bat.",
         "error_port_number": "Port must be a number.",
         "error_port_range": "Port must be in the 1-65535 range.",
@@ -114,6 +125,9 @@ TRANSLATIONS = {
         "language": "Language",
         "log_connecting": "Connecting to {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Processing folder: {name}",
+        "log_password_deleted": "Saved password deleted.",
+        "log_password_loaded": "Saved password loaded from the system credential store.",
+        "log_password_saved": "Password saved in the system credential store.",
         "log_skipped": "Skipped, already exists: {path}",
         "log_uploaded": "Uploaded: {path} - 100% - {speed}",
         "log_uploading": "Uploading: {path} - {percent}% - {speed}",
@@ -124,6 +138,7 @@ TRANSLATIONS = {
         "remote_path_default": "Default Deck path",
         "remove": "Remove",
         "selected_remote_path": "Deck path for selected folder",
+        "save_password": "Save password securely",
         "status_ready": "Ready",
         "status_stopping": "Stopping...",
         "status_testing": "Checking SSH...",
@@ -163,6 +178,18 @@ def format_transfer_percent(sent_bytes: int, total_bytes: int) -> str:
         return "100.0" if sent_bytes else "0.0"
     percent = min((sent_bytes / total_bytes) * 100, 100)
     return f"{percent:.1f}"
+
+
+def credential_key_for(settings: "Settings") -> str:
+    return f"ssh:{settings.username}@{settings.host}:{settings.port}"
+
+
+def require_keyring(translate: callable):
+    try:
+        import keyring  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError(translate("error_keyring_missing")) from exc
+    return keyring
 
 
 def app_config_path() -> Path:
@@ -240,6 +267,8 @@ class Settings:
     auth_method: str = AUTH_PASSWORD
     language: str = LANG_RU
     identity_file: str = ""
+    save_password: bool = False
+    credential_key: str = ""
     sources: list[TransferItem] = field(default_factory=list)
 
     @classmethod
@@ -270,6 +299,8 @@ class Settings:
         language = str(raw.get("language") or settings.language)
         settings.language = language if language in TRANSLATIONS else LANG_RU
         settings.identity_file = str(raw.get("identity_file") or "")
+        settings.save_password = bool(raw.get("save_password", False))
+        settings.credential_key = str(raw.get("credential_key") or "")
         settings.sources = [
             item
             for item in (
@@ -289,6 +320,8 @@ class Settings:
             "auth_method": self.auth_method,
             "language": self.language,
             "identity_file": self.identity_file,
+            "save_password": self.save_password,
+            "credential_key": self.credential_key,
             "sources": [source.to_config() for source in self.sources],
         }
         data = json.dumps(payload, indent=2)
@@ -521,6 +554,7 @@ class DeckShareApp(ttk.Frame):
         self.worker: threading.Thread | None = None
         self.localized_widgets: list[tuple[tk.Widget, str]] = []
         self.source_items: list[TransferItem] = list(self.settings.sources)
+        self.stored_credential_key = self.settings.credential_key
 
         self.host_var = tk.StringVar(value=self.settings.host)
         self.user_var = tk.StringVar(value=self.settings.username)
@@ -531,6 +565,7 @@ class DeckShareApp(ttk.Frame):
         self.language_var = tk.StringVar(value=self.settings.language)
         self.identity_var = tk.StringVar(value=self.settings.identity_file)
         self.password_var = tk.StringVar(value="")
+        self.save_password_var = tk.BooleanVar(value=self.settings.save_password)
         self.status_var = tk.StringVar(value=self.tr("status_ready"))
         self.runner = SftpRunner(self.messages, self.cancel_event, self.make_translator(self.settings.language))
 
@@ -539,6 +574,7 @@ class DeckShareApp(ttk.Frame):
         self._load_sources()
         self.update_auth_fields()
         self.apply_language()
+        self.load_saved_password()
         self._poll_messages()
 
     def tr(self, key: str, **kwargs: object) -> str:
@@ -629,11 +665,20 @@ class DeckShareApp(ttk.Frame):
         self.password_entry = ttk.Entry(self.settings_box, textvariable=self.password_var, show="*")
         self.password_entry.grid(row=5, column=1, sticky="ew", padx=12, pady=6)
 
+        self.save_password_check = ttk.Checkbutton(
+            self.settings_box,
+            text=self.tr("save_password"),
+            variable=self.save_password_var,
+            command=self.handle_save_password_toggle,
+        )
+        self.save_password_check.grid(row=6, column=1, sticky="w", padx=12, pady=6)
+        self.localized_widgets.append((self.save_password_check, "save_password"))
+
         self.identity_label = ttk.Label(self.settings_box, text=self.tr("identity"))
-        self.identity_label.grid(row=6, column=0, sticky="w", padx=12, pady=6)
+        self.identity_label.grid(row=7, column=0, sticky="w", padx=12, pady=6)
         self.localized_widgets.append((self.identity_label, "identity"))
         key_row = ttk.Frame(self.settings_box)
-        key_row.grid(row=6, column=1, sticky="ew", padx=12, pady=6)
+        key_row.grid(row=7, column=1, sticky="ew", padx=12, pady=6)
         key_row.columnconfigure(0, weight=1)
         self.identity_entry = ttk.Entry(key_row, textvariable=self.identity_var)
         self.identity_entry.grid(row=0, column=0, sticky="ew")
@@ -745,16 +790,87 @@ class DeckShareApp(ttk.Frame):
         self.apply_language()
         self.save_settings()
 
+    def load_saved_password(self) -> None:
+        if (
+            not self.settings.save_password
+            or self.settings.auth_method != AUTH_PASSWORD
+            or not self.settings.credential_key
+        ):
+            return
+
+        try:
+            keyring = require_keyring(self.tr)
+            saved_password = keyring.get_password(KEYRING_SERVICE, self.settings.credential_key)
+        except Exception as exc:  # noqa: BLE001 - keyring backends raise different exceptions.
+            self.messages.put(("error", self.tr("error_keyring_read_failed", error=exc)))
+            return
+
+        if saved_password:
+            self.password_var.set(saved_password)
+            self.messages.put(("info", self.tr("log_password_loaded")))
+
+    def handle_save_password_toggle(self) -> None:
+        if self.save_password_var.get():
+            self.save_settings()
+            return
+
+        settings = self.collect_settings(validate_auth=False)
+        if settings is None:
+            return
+        self.delete_saved_password()
+        settings.save_password = False
+        settings.credential_key = ""
+        settings.save()
+
+    def delete_saved_password(self) -> None:
+        if not self.stored_credential_key:
+            return
+
+        try:
+            keyring = require_keyring(self.tr)
+            keyring.delete_password(KEYRING_SERVICE, self.stored_credential_key)
+            self.messages.put(("info", self.tr("log_password_deleted")))
+        except Exception:
+            pass
+        finally:
+            self.stored_credential_key = ""
+
+    def persist_password_preference(self, settings: Settings, secret: str) -> bool:
+        if settings.auth_method != AUTH_PASSWORD or not settings.save_password:
+            self.delete_saved_password()
+            settings.save_password = False
+            settings.credential_key = ""
+            return True
+
+        try:
+            keyring = require_keyring(self.tr)
+            credential_key = credential_key_for(settings)
+            keyring.set_password(KEYRING_SERVICE, credential_key, secret)
+            if self.stored_credential_key and self.stored_credential_key != credential_key:
+                try:
+                    keyring.delete_password(KEYRING_SERVICE, self.stored_credential_key)
+                except Exception:
+                    pass
+            settings.credential_key = credential_key
+            self.stored_credential_key = credential_key
+            self.messages.put(("info", self.tr("log_password_saved")))
+            return True
+        except Exception as exc:  # noqa: BLE001 - keyring backends raise different exceptions.
+            messagebox.showerror(APP_NAME, self.tr("error_keyring_save_failed", error=exc))
+            return False
+
     def update_auth_fields(self) -> None:
         is_key = self.auth_method_var.get() == AUTH_KEY
         if is_key:
             self.password_label.configure(text=self.tr("passphrase"))
             self.identity_entry.configure(state="normal")
             self.identity_button.configure(state="normal")
+            self.save_password_check.configure(state="disabled")
         else:
             self.password_label.configure(text=self.tr("password"))
             self.identity_entry.configure(state="disabled")
             self.identity_button.configure(state="disabled")
+            self.save_password_check.configure(state="normal")
 
     def _load_sources(self) -> None:
         self.refresh_source_list()
@@ -863,6 +979,8 @@ class DeckShareApp(ttk.Frame):
             messagebox.showerror(APP_NAME, self.tr("error_identity_missing"))
             return None
 
+        should_save_password = self.save_password_var.get() if auth_method == AUTH_PASSWORD else False
+
         return Settings(
             host=host,
             username=username,
@@ -871,6 +989,8 @@ class DeckShareApp(ttk.Frame):
             auth_method=auth_method,
             language=self.language_var.get() if self.language_var.get() in TRANSLATIONS else LANG_RU,
             identity_file=identity_file,
+            save_password=should_save_password,
+            credential_key=self.stored_credential_key if should_save_password else "",
             sources=list(self.source_items),
         )
 
@@ -896,6 +1016,8 @@ class DeckShareApp(ttk.Frame):
         secret = self.collect_secret()
         if secret is None:
             return
+        if not self.persist_password_preference(settings, secret):
+            return
         settings.save()
         self.runner.tr = self.make_translator(settings.language)
         self._start_worker(lambda: self.runner.test_connection(settings, secret), self.tr("status_testing"))
@@ -906,6 +1028,8 @@ class DeckShareApp(ttk.Frame):
             return
         secret = self.collect_secret()
         if secret is None:
+            return
+        if not self.persist_password_preference(settings, secret):
             return
         settings.save()
         self.remote_path_var.set(settings.remote_path)
