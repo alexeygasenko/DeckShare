@@ -67,14 +67,13 @@ TRANSLATIONS = {
         "language": "Язык",
         "log_connecting": "Подключаюсь к {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Обрабатываю папку: {name}",
-        "log_hashing": "Проверяю целостность: {path}",
+        "log_hashing": "Проверяю загруженный файл: {path}",
         "log_password_deleted": "Сохраненный пароль удален.",
         "log_password_loaded": "Сохраненный пароль загружен из системного хранилища.",
         "log_password_saved": "Пароль сохранен в системном хранилище.",
         "log_reuploading": "Файл будет передан заново: {path} ({reason})",
-        "log_reuploading_hash": "хэш отличается",
         "log_reuploading_size": "размер отличается",
-        "log_skipped": "Пропущен, файл уже есть и хэш совпал: {path}",
+        "log_skipped": "Пропущен, файл уже есть и размер совпал: {path}",
         "log_uploaded": "Отправлен: {path} - 100% - {speed}",
         "log_uploading": "Передается: {path} - {percent}% - {speed}",
         "passphrase": "Фраза ключа",
@@ -135,14 +134,13 @@ TRANSLATIONS = {
         "language": "Language",
         "log_connecting": "Connecting to {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Processing folder: {name}",
-        "log_hashing": "Verifying integrity: {path}",
+        "log_hashing": "Verifying uploaded file: {path}",
         "log_password_deleted": "Saved password deleted.",
         "log_password_loaded": "Saved password loaded from the system credential store.",
         "log_password_saved": "Password saved in the system credential store.",
         "log_reuploading": "File will be uploaded again: {path} ({reason})",
-        "log_reuploading_hash": "hash differs",
         "log_reuploading_size": "size differs",
-        "log_skipped": "Skipped, file already exists and hash matches: {path}",
+        "log_skipped": "Skipped, file already exists and size matches: {path}",
         "log_uploaded": "Uploaded: {path} - 100% - {speed}",
         "log_uploading": "Uploading: {path} - {percent}% - {speed}",
         "passphrase": "Key passphrase",
@@ -570,22 +568,19 @@ class SftpRunner:
                 file_size = local_file.stat().st_size
                 remote_attrs = self.remote_stat(remote_file)
 
-                self._emit("output", self.tr("log_hashing", path=remote_file))
-                local_hash = self.local_sha256(local_file)
-
                 if remote_attrs is not None:
                     if remote_attrs.st_size == file_size:
-                        remote_hash = self.remote_sha256(remote_file)
-                        if remote_hash == local_hash:
-                            skipped += 1
-                            self._emit("output", self.tr("log_skipped", path=remote_file))
-                            continue
-                        reason = self.tr("log_reuploading_hash")
-                    else:
-                        reason = self.tr("log_reuploading_size")
-                    self._emit("info", self.tr("log_reuploading", path=remote_file, reason=reason))
+                        skipped += 1
+                        self._emit("output", self.tr("log_skipped", path=remote_file))
+                        continue
+
+                    self._emit(
+                        "info",
+                        self.tr("log_reuploading", path=remote_file, reason=self.tr("log_reuploading_size")),
+                    )
 
                 self.remove_remote_file(temp_file)
+                local_hash = self.local_sha256(local_file)
                 started_at = time.monotonic()
                 last_progress_at = 0.0
 
@@ -607,6 +602,7 @@ class SftpRunner:
 
                 progress_callback(0, file_size)
                 self.sftp.put(str(local_file), temp_file, callback=progress_callback)
+                self._emit("output", self.tr("log_hashing", path=temp_file))
                 temp_attrs = self.remote_stat(temp_file)
                 temp_hash = self.remote_sha256(temp_file)
                 if temp_attrs is None or temp_attrs.st_size != file_size or temp_hash != local_hash:
