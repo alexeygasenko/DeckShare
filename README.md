@@ -41,6 +41,6 @@ Add Windows directories, choose a Deck destination for each selected folder, che
 - Login can use either the Steam Deck user password or a private SSH key.
 - Passwords are not saved in the config file. If enabled, DeckShare stores the SSH password in the operating system credential store via `keyring`; the config only keeps a non-secret lookup key.
 - Transfers use SFTP. Existing final files are skipped when size matches. New or changed files are uploaded to a temporary `.deckshare-part` file, verified with SHA-256, then used to replace the final file.
-- During upload, the log shows the active file, per-file percentage, and current average speed.
+- During upload, the log shows the active file, per-file percentage, current average speed, ETA for the current file, and ETA for all remaining upload bytes.
 - Extra files already present on the Steam Deck are not deleted.
 - If `steamdeck.local` does not resolve on Windows, use the Steam Deck IP address shown in network settings. Bonjour/mDNS support can also make `.local` names work on Windows.

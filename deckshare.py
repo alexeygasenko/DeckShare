@@ -77,7 +77,7 @@ TRANSLATIONS = {
         "log_reuploading_size": "размер отличается",
         "log_skipped": "Пропущен, файл уже есть и размер совпал: {path}",
         "log_uploaded": "Отправлен: {path} - 100% - {speed}",
-        "log_uploading": "Передается: {path} - {percent}% - {speed}",
+        "log_uploading": "Передается: {path} - {percent}% - {speed} - осталось: файл {file_eta}, всего {total_eta}",
         "passphrase": "Фраза ключа",
         "password": "Пароль",
         "port": "Порт",
@@ -144,7 +144,7 @@ TRANSLATIONS = {
         "log_reuploading_size": "size differs",
         "log_skipped": "Skipped, file already exists and size matches: {path}",
         "log_uploaded": "Uploaded: {path} - 100% - {speed}",
-        "log_uploading": "Uploading: {path} - {percent}% - {speed}",
+        "log_uploading": "Uploading: {path} - {percent}% - {speed} - ETA: file {file_eta}, total {total_eta}",
         "passphrase": "Key passphrase",
         "password": "Password",
         "port": "Port",
@@ -192,6 +192,18 @@ def format_transfer_percent(sent_bytes: int, total_bytes: int) -> str:
         return "100.0" if sent_bytes else "0.0"
     percent = min((sent_bytes / total_bytes) * 100, 100)
     return f"{percent:.1f}"
+
+
+def format_duration(seconds: float | None) -> str:
+    if seconds is None or seconds < 0:
+        return "--"
+
+    total_seconds = int(seconds + 0.5)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:d}:{secs:02d}"
 
 
 def credential_key_for(settings: "Settings") -> str:
@@ -274,6 +286,14 @@ class TransferItem:
             "local_path": self.local_path,
             "remote_path": self.remote_path,
         }
+
+
+@dataclass
+class UploadTask:
+    local_path: Path
+    remote_path: str
+    temp_path: str
+    size: int
 
 
 @dataclass
@@ -361,6 +381,9 @@ class SftpRunner:
         self.tr = translate
         self.client = None
         self.sftp = None
+        self.transfer_started_at = 0.0
+        self.transfer_total_bytes = 0
+        self.transfer_completed_bytes = 0
 
     def stop(self) -> None:
         self.cancel_event.set()
@@ -470,8 +493,8 @@ class SftpRunner:
 
         try:
             total = len(valid_sources)
-            uploaded = 0
             skipped = 0
+            upload_tasks: list[UploadTask] = []
             for index, source in enumerate(valid_sources, start=1):
                 if self.cancel_event.is_set():
                     self._emit("error", self.tr("error_stopped"))
@@ -481,9 +504,20 @@ class SftpRunner:
                 name = source_path.name
                 remote_root = source.remote_path
                 self._emit("info", self.tr("log_processing_folder", index=index, total=total, name=name))
-                source_uploaded, source_skipped = self.upload_directory(source_path, remote_root)
-                uploaded += source_uploaded
+                source_tasks, source_skipped = self.build_upload_tasks(source_path, remote_root)
+                upload_tasks.extend(source_tasks)
                 skipped += source_skipped
+
+            uploaded = 0
+            self.transfer_completed_bytes = 0
+            self.transfer_total_bytes = sum(task.size for task in upload_tasks)
+            self.transfer_started_at = time.monotonic()
+            for task in upload_tasks:
+                if self.cancel_event.is_set():
+                    self._emit("error", self.tr("error_stopped"))
+                    return False
+                self.upload_file(task)
+                uploaded += 1
 
             self._emit("success", self.tr("success_transfer", uploaded=uploaded, skipped=skipped))
             return True
@@ -548,15 +582,15 @@ class SftpRunner:
         self.remove_remote_file(final_path)
         self.sftp.rename(temp_path, final_path)
 
-    def upload_directory(self, source_root: Path, remote_root: str) -> tuple[int, int]:
+    def build_upload_tasks(self, source_root: Path, remote_root: str) -> tuple[list[UploadTask], int]:
         assert self.sftp is not None
-        uploaded = 0
+        tasks: list[UploadTask] = []
         skipped = 0
         self.ensure_remote_dir(remote_root)
 
         for local_dir, dir_names, file_names in os.walk(source_root):
             if self.cancel_event.is_set():
-                return uploaded, skipped
+                return tasks, skipped
 
             dir_names.sort()
             file_names.sort()
@@ -569,7 +603,7 @@ class SftpRunner:
 
             for file_name in file_names:
                 if self.cancel_event.is_set():
-                    return uploaded, skipped
+                    return tasks, skipped
 
                 local_file = Path(local_dir) / file_name
                 remote_file = posixpath.join(remote_dir, file_name)
@@ -588,43 +622,68 @@ class SftpRunner:
                         self.tr("log_reuploading", path=remote_file, reason=self.tr("log_reuploading_size")),
                     )
 
-                self.remove_remote_file(temp_file)
-                local_hash = self.local_sha256(local_file)
-                started_at = time.monotonic()
-                last_progress_at = 0.0
-
-                def progress_callback(sent_bytes: int, total_bytes: int) -> None:
-                    nonlocal last_progress_at
-                    now = time.monotonic()
-                    total = total_bytes or file_size
-                    if now - last_progress_at < 1 and sent_bytes < total:
-                        return
-
-                    elapsed = max(now - started_at, 0.001)
-                    speed = format_transfer_speed(sent_bytes / elapsed)
-                    percent = format_transfer_percent(sent_bytes, total)
-                    self._emit(
-                        "progress",
-                        self.tr("log_uploading", path=remote_file, percent=percent, speed=speed),
+                tasks.append(
+                    UploadTask(
+                        local_path=local_file,
+                        remote_path=remote_file,
+                        temp_path=temp_file,
+                        size=file_size,
                     )
-                    last_progress_at = now
+                )
 
-                progress_callback(0, file_size)
-                self.sftp.put(str(local_file), temp_file, callback=progress_callback)
-                upload_elapsed = max(time.monotonic() - started_at, 0.001)
-                self._emit("output", self.tr("log_hashing", path=temp_file))
-                temp_attrs = self.remote_stat(temp_file)
-                temp_hash = self.remote_sha256(temp_file)
-                if temp_attrs is None or temp_attrs.st_size != file_size or temp_hash != local_hash:
-                    self.remove_remote_file(temp_file)
-                    raise RuntimeError(self.tr("error_upload_verify_failed", path=remote_file))
+        return tasks, skipped
 
-                self.replace_remote_file(temp_file, remote_file)
-                uploaded += 1
-                speed = format_transfer_speed(file_size / upload_elapsed)
-                self._emit("output", self.tr("log_uploaded", path=remote_file, speed=speed))
+    def upload_file(self, task: UploadTask) -> None:
+        assert self.sftp is not None
+        self.remove_remote_file(task.temp_path)
+        local_hash = self.local_sha256(task.local_path)
+        started_at = time.monotonic()
+        last_progress_at = 0.0
 
-        return uploaded, skipped
+        def progress_callback(sent_bytes: int, total_bytes: int) -> None:
+            nonlocal last_progress_at
+            now = time.monotonic()
+            total = total_bytes or task.size
+            if now - last_progress_at < 1 and sent_bytes < total:
+                return
+
+            elapsed = max(now - started_at, 0.001)
+            current_speed = sent_bytes / elapsed
+            total_sent = self.transfer_completed_bytes + sent_bytes
+            overall_elapsed = max(now - self.transfer_started_at, 0.001)
+            overall_speed = total_sent / overall_elapsed if total_sent else 0
+            file_eta = format_duration((total - sent_bytes) / current_speed) if current_speed > 0 else "--"
+            total_remaining = max(self.transfer_total_bytes - total_sent, 0)
+            total_eta = format_duration(total_remaining / overall_speed) if overall_speed > 0 else "--"
+            speed = format_transfer_speed(current_speed)
+            percent = format_transfer_percent(sent_bytes, total)
+            self._emit(
+                "progress",
+                self.tr(
+                    "log_uploading",
+                    path=task.remote_path,
+                    percent=percent,
+                    speed=speed,
+                    file_eta=file_eta,
+                    total_eta=total_eta,
+                ),
+            )
+            last_progress_at = now
+
+        progress_callback(0, task.size)
+        self.sftp.put(str(task.local_path), task.temp_path, callback=progress_callback)
+        upload_elapsed = max(time.monotonic() - started_at, 0.001)
+        self._emit("output", self.tr("log_hashing", path=task.temp_path))
+        temp_attrs = self.remote_stat(task.temp_path)
+        temp_hash = self.remote_sha256(task.temp_path)
+        if temp_attrs is None or temp_attrs.st_size != task.size or temp_hash != local_hash:
+            self.remove_remote_file(task.temp_path)
+            raise RuntimeError(self.tr("error_upload_verify_failed", path=task.remote_path))
+
+        self.replace_remote_file(task.temp_path, task.remote_path)
+        self.transfer_completed_bytes += task.size
+        speed = format_transfer_speed(task.size / upload_elapsed)
+        self._emit("output", self.tr("log_uploaded", path=task.remote_path, speed=speed))
 
 
 class DeckShareApp(ttk.Frame):
