@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import posixpath
@@ -56,6 +57,7 @@ TRANSLATIONS = {
         "error_prepare_failed": "Не удалось подготовить подключение: {error}",
         "error_stopped": "Передача остановлена.",
         "error_transfer_failed": "Передача не удалась: {error}",
+        "error_upload_verify_failed": "Проверка загруженного файла не прошла: {path}",
         "group_actions": "Действия",
         "group_log": "Журнал",
         "group_sources": "Директории Windows",
@@ -65,10 +67,14 @@ TRANSLATIONS = {
         "language": "Язык",
         "log_connecting": "Подключаюсь к {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Обрабатываю папку: {name}",
+        "log_hashing": "Проверяю целостность: {path}",
         "log_password_deleted": "Сохраненный пароль удален.",
         "log_password_loaded": "Сохраненный пароль загружен из системного хранилища.",
         "log_password_saved": "Пароль сохранен в системном хранилище.",
-        "log_skipped": "Пропущен, уже есть: {path}",
+        "log_reuploading": "Файл будет передан заново: {path} ({reason})",
+        "log_reuploading_hash": "хэш отличается",
+        "log_reuploading_size": "размер отличается",
+        "log_skipped": "Пропущен, файл уже есть и хэш совпал: {path}",
         "log_uploaded": "Отправлен: {path} - 100% - {speed}",
         "log_uploading": "Передается: {path} - {percent}% - {speed}",
         "passphrase": "Фраза ключа",
@@ -119,6 +125,7 @@ TRANSLATIONS = {
         "error_prepare_failed": "Could not prepare the connection: {error}",
         "error_stopped": "Transfer stopped.",
         "error_transfer_failed": "Transfer failed: {error}",
+        "error_upload_verify_failed": "Uploaded file verification failed: {path}",
         "group_actions": "Actions",
         "group_log": "Log",
         "group_sources": "Windows directories",
@@ -128,10 +135,14 @@ TRANSLATIONS = {
         "language": "Language",
         "log_connecting": "Connecting to {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Processing folder: {name}",
+        "log_hashing": "Verifying integrity: {path}",
         "log_password_deleted": "Saved password deleted.",
         "log_password_loaded": "Saved password loaded from the system credential store.",
         "log_password_saved": "Password saved in the system credential store.",
-        "log_skipped": "Skipped, already exists: {path}",
+        "log_reuploading": "File will be uploaded again: {path} ({reason})",
+        "log_reuploading_hash": "hash differs",
+        "log_reuploading_size": "size differs",
+        "log_skipped": "Skipped, file already exists and hash matches: {path}",
         "log_uploaded": "Uploaded: {path} - 100% - {speed}",
         "log_uploading": "Uploading: {path} - {percent}% - {speed}",
         "passphrase": "Key passphrase",
@@ -231,6 +242,10 @@ def normalize_remote_path(value: str) -> str:
     if not cleaned:
         return DEFAULT_REMOTE_PATH
     return cleaned.rstrip("/") or "/"
+
+
+def quote_posix(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
 @dataclass
@@ -484,13 +499,47 @@ class SftpRunner:
             except OSError:
                 self.sftp.mkdir(current)
 
-    def remote_exists(self, remote_path: str) -> bool:
+    def remote_stat(self, remote_path: str):
         assert self.sftp is not None
         try:
-            self.sftp.stat(remote_path)
-            return True
+            return self.sftp.stat(remote_path)
         except OSError:
-            return False
+            return None
+
+    def local_sha256(self, local_path: Path) -> str:
+        digest = hashlib.sha256()
+        with local_path.open("rb") as file:
+            for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def remote_sha256(self, remote_path: str) -> str | None:
+        assert self.client is not None
+        command = f"sha256sum -- {quote_posix(remote_path)}"
+        _, stdout, stderr = self.client.exec_command(command)
+        output = stdout.read().decode("utf-8", errors="replace").strip()
+        stderr.read()
+        if stdout.channel.recv_exit_status() != 0 or not output:
+            return None
+        return output.split()[0].lower()
+
+    def remove_remote_file(self, remote_path: str) -> None:
+        assert self.sftp is not None
+        try:
+            self.sftp.remove(remote_path)
+        except OSError:
+            pass
+
+    def replace_remote_file(self, temp_path: str, final_path: str) -> None:
+        assert self.sftp is not None
+        try:
+            self.sftp.posix_rename(temp_path, final_path)
+            return
+        except (AttributeError, OSError):
+            pass
+
+        self.remove_remote_file(final_path)
+        self.sftp.rename(temp_path, final_path)
 
     def upload_directory(self, source_root: Path, remote_root: str) -> tuple[int, int]:
         assert self.sftp is not None
@@ -517,14 +566,28 @@ class SftpRunner:
 
                 local_file = Path(local_dir) / file_name
                 remote_file = posixpath.join(remote_dir, file_name)
-                if self.remote_exists(remote_file):
-                    skipped += 1
-                    self._emit("output", self.tr("log_skipped", path=remote_file))
-                    continue
+                temp_file = f"{remote_file}.deckshare-part"
+                file_size = local_file.stat().st_size
+                remote_attrs = self.remote_stat(remote_file)
 
+                self._emit("output", self.tr("log_hashing", path=remote_file))
+                local_hash = self.local_sha256(local_file)
+
+                if remote_attrs is not None:
+                    if remote_attrs.st_size == file_size:
+                        remote_hash = self.remote_sha256(remote_file)
+                        if remote_hash == local_hash:
+                            skipped += 1
+                            self._emit("output", self.tr("log_skipped", path=remote_file))
+                            continue
+                        reason = self.tr("log_reuploading_hash")
+                    else:
+                        reason = self.tr("log_reuploading_size")
+                    self._emit("info", self.tr("log_reuploading", path=remote_file, reason=reason))
+
+                self.remove_remote_file(temp_file)
                 started_at = time.monotonic()
                 last_progress_at = 0.0
-                file_size = local_file.stat().st_size
 
                 def progress_callback(sent_bytes: int, total_bytes: int) -> None:
                     nonlocal last_progress_at
@@ -543,7 +606,14 @@ class SftpRunner:
                     last_progress_at = now
 
                 progress_callback(0, file_size)
-                self.sftp.put(str(local_file), remote_file, callback=progress_callback)
+                self.sftp.put(str(local_file), temp_file, callback=progress_callback)
+                temp_attrs = self.remote_stat(temp_file)
+                temp_hash = self.remote_sha256(temp_file)
+                if temp_attrs is None or temp_attrs.st_size != file_size or temp_hash != local_hash:
+                    self.remove_remote_file(temp_file)
+                    raise RuntimeError(self.tr("error_upload_verify_failed", path=remote_file))
+
+                self.replace_remote_file(temp_file, remote_file)
                 uploaded += 1
                 elapsed = max(time.monotonic() - started_at, 0.001)
                 speed = format_transfer_speed(file_size / elapsed)
