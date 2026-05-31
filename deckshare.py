@@ -4,6 +4,7 @@ import json
 import os
 import posixpath
 import queue
+import socket
 import sys
 import threading
 import time
@@ -41,6 +42,7 @@ TRANSLATIONS = {
         "error_connect_failed": "SSH-проверка не удалась: {error}",
         "error_generic": "Ошибка: {error}",
         "error_host_user_required": "Хост и пользователь обязательны.",
+        "error_host_not_found": "Не удалось найти хост '{host}'. Укажите IP-адрес Steam Deck вместо steamdeck.local или настройте mDNS/Bonjour в Windows.",
         "error_identity_missing": "Выбранный SSH-ключ не найден.",
         "error_missing_folder": "Папка недоступна: {source}",
         "error_no_password": "Введите пароль пользователя Steam Deck.",
@@ -103,6 +105,7 @@ TRANSLATIONS = {
         "error_connect_failed": "SSH check failed: {error}",
         "error_generic": "Error: {error}",
         "error_host_user_required": "Host and user are required.",
+        "error_host_not_found": "Could not resolve host '{host}'. Use the Steam Deck IP address instead of steamdeck.local, or set up mDNS/Bonjour on Windows.",
         "error_identity_missing": "Selected SSH key was not found.",
         "error_missing_folder": "Folder is not available: {source}",
         "error_no_password": "Enter the Steam Deck user password.",
@@ -396,6 +399,11 @@ class SftpRunner:
         self.client = client
         self.sftp = client.open_sftp()
 
+    def describe_connection_error(self, settings: Settings, error: Exception) -> str:
+        if isinstance(error, socket.gaierror):
+            return self.tr("error_host_not_found", host=settings.host)
+        return str(error)
+
     def test_connection(self, settings: Settings, secret: str) -> bool:
         try:
             self.connect(settings, secret)
@@ -410,7 +418,7 @@ class SftpRunner:
             self._emit("success", self.tr("success_connection"))
             return True
         except Exception as exc:  # noqa: BLE001 - surface connection errors in UI.
-            self._emit("error", self.tr("error_connect_failed", error=exc))
+            self._emit("error", self.tr("error_connect_failed", error=self.describe_connection_error(settings, exc)))
             return False
         finally:
             self.close()
@@ -434,7 +442,7 @@ class SftpRunner:
             for source in valid_sources:
                 self.ensure_remote_dir(source.remote_path)
         except Exception as exc:  # noqa: BLE001 - surface connection/setup errors in UI.
-            self._emit("error", self.tr("error_prepare_failed", error=exc))
+            self._emit("error", self.tr("error_prepare_failed", error=self.describe_connection_error(settings, exc)))
             self.close()
             return False
 
