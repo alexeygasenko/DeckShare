@@ -28,6 +28,7 @@ if LOCAL_DEPENDENCY_DIR.exists():
 TRANSLATIONS = {
     LANG_RU: {
         "add": "Добавить",
+        "apply_remote_path": "Применить",
         "auth": "Вход",
         "auth_key": "SSH-ключ",
         "auth_password": "Пароль",
@@ -64,7 +65,9 @@ TRANSLATIONS = {
         "password": "Пароль",
         "port": "Порт",
         "remote_path": "Путь на Deck",
+        "remote_path_default": "Путь на Deck по умолчанию",
         "remove": "Удалить",
+        "selected_remote_path": "Путь на Deck для выбранной папки",
         "status_ready": "Готово",
         "status_stopping": "Останавливаю...",
         "status_testing": "Проверяю SSH...",
@@ -79,6 +82,7 @@ TRANSLATIONS = {
     },
     LANG_EN: {
         "add": "Add",
+        "apply_remote_path": "Apply",
         "auth": "Login",
         "auth_key": "SSH key",
         "auth_password": "Password",
@@ -115,7 +119,9 @@ TRANSLATIONS = {
         "password": "Password",
         "port": "Port",
         "remote_path": "Deck path",
+        "remote_path_default": "Default Deck path",
         "remove": "Remove",
+        "selected_remote_path": "Deck path for selected folder",
         "status_ready": "Ready",
         "status_stopping": "Stopping...",
         "status_testing": "Checking SSH...",
@@ -176,6 +182,34 @@ def normalize_remote_path(value: str) -> str:
 
 
 @dataclass
+class TransferItem:
+    local_path: str
+    remote_path: str = DEFAULT_REMOTE_PATH
+
+    @classmethod
+    def from_config(cls, raw: object, default_remote_path: str) -> "TransferItem | None":
+        if isinstance(raw, str):
+            local_path = raw
+            remote_path = default_remote_path
+        elif isinstance(raw, dict):
+            local_path = str(raw.get("local_path") or raw.get("path") or "")
+            remote_path = str(raw.get("remote_path") or default_remote_path)
+        else:
+            return None
+
+        if not local_path or not Path(local_path).exists():
+            return None
+
+        return cls(local_path=str(Path(local_path)), remote_path=normalize_remote_path(remote_path))
+
+    def to_config(self) -> dict[str, str]:
+        return {
+            "local_path": self.local_path,
+            "remote_path": self.remote_path,
+        }
+
+
+@dataclass
 class Settings:
     host: str = "steamdeck.local"
     username: str = "deck"
@@ -184,7 +218,7 @@ class Settings:
     auth_method: str = AUTH_PASSWORD
     language: str = LANG_RU
     identity_file: str = ""
-    sources: list[str] = field(default_factory=list)
+    sources: list[TransferItem] = field(default_factory=list)
 
     @classmethod
     def load(cls) -> "Settings":
@@ -214,7 +248,14 @@ class Settings:
         language = str(raw.get("language") or settings.language)
         settings.language = language if language in TRANSLATIONS else LANG_RU
         settings.identity_file = str(raw.get("identity_file") or "")
-        settings.sources = [str(item) for item in raw.get("sources", []) if Path(str(item)).exists()]
+        settings.sources = [
+            item
+            for item in (
+                TransferItem.from_config(source, settings.remote_path)
+                for source in raw.get("sources", [])
+            )
+            if item is not None
+        ]
         return settings
 
     def save(self) -> None:
@@ -226,7 +267,7 @@ class Settings:
             "auth_method": self.auth_method,
             "language": self.language,
             "identity_file": self.identity_file,
-            "sources": self.sources,
+            "sources": [source.to_config() for source in self.sources],
         }
         data = json.dumps(payload, indent=2)
         try:
@@ -324,10 +365,10 @@ class SftpRunner:
             self._emit("error", self.tr("error_no_sources"))
             return False
 
-        valid_sources = [source for source in settings.sources if Path(source).is_dir()]
+        valid_sources = [source for source in settings.sources if Path(source.local_path).is_dir()]
         missing = [source for source in settings.sources if source not in valid_sources]
         for source in missing:
-            self._emit("error", self.tr("error_missing_folder", source=source))
+            self._emit("error", self.tr("error_missing_folder", source=source.local_path))
 
         if not valid_sources:
             return False
@@ -335,7 +376,8 @@ class SftpRunner:
         try:
             self.connect(settings, secret)
             assert self.sftp is not None
-            self.ensure_remote_dir(settings.remote_path)
+            for source in valid_sources:
+                self.ensure_remote_dir(source.remote_path)
         except Exception as exc:  # noqa: BLE001 - surface connection/setup errors in UI.
             self._emit("error", self.tr("error_prepare_failed", error=exc))
             self.close()
@@ -350,10 +392,11 @@ class SftpRunner:
                     self._emit("error", self.tr("error_stopped"))
                     return False
 
-                name = Path(source).name
-                remote_root = posixpath.join(settings.remote_path, name)
+                source_path = Path(source.local_path)
+                name = source_path.name
+                remote_root = posixpath.join(source.remote_path, name)
                 self._emit("info", self.tr("log_processing_folder", index=index, total=total, name=name))
-                source_uploaded, source_skipped = self.upload_directory(Path(source), remote_root)
+                source_uploaded, source_skipped = self.upload_directory(source_path, remote_root)
                 uploaded += source_uploaded
                 skipped += source_skipped
 
@@ -432,11 +475,13 @@ class DeckShareApp(ttk.Frame):
         self.cancel_event = threading.Event()
         self.worker: threading.Thread | None = None
         self.localized_widgets: list[tuple[tk.Widget, str]] = []
+        self.source_items: list[TransferItem] = list(self.settings.sources)
 
         self.host_var = tk.StringVar(value=self.settings.host)
         self.user_var = tk.StringVar(value=self.settings.username)
         self.port_var = tk.StringVar(value=str(self.settings.port))
         self.remote_path_var = tk.StringVar(value=self.settings.remote_path)
+        self.selected_remote_path_var = tk.StringVar(value="")
         self.auth_method_var = tk.StringVar(value=self.settings.auth_method)
         self.language_var = tk.StringVar(value=self.settings.language)
         self.identity_var = tk.StringVar(value=self.settings.identity_file)
@@ -508,7 +553,7 @@ class DeckShareApp(ttk.Frame):
         self._entry(self.settings_box, "host", self.host_var, 0)
         self._entry(self.settings_box, "user", self.user_var, 1)
         self._entry(self.settings_box, "port", self.port_var, 2)
-        self._entry(self.settings_box, "remote_path", self.remote_path_var, 3)
+        self._entry(self.settings_box, "remote_path_default", self.remote_path_var, 3)
 
         self.auth_label = ttk.Label(self.settings_box, text=self.tr("auth"))
         self.auth_label.grid(row=4, column=0, sticky="w", padx=12, pady=6)
@@ -558,12 +603,29 @@ class DeckShareApp(ttk.Frame):
 
         self.source_list = tk.Listbox(self.source_box, height=10, activestyle="none", exportselection=False)
         self.source_list.grid(row=0, column=0, sticky="nsew", padx=(12, 0), pady=12)
+        self.source_list.bind("<<ListboxSelect>>", self.update_selected_source_path)
         source_scroll = ttk.Scrollbar(self.source_box, orient="vertical", command=self.source_list.yview)
         source_scroll.grid(row=0, column=1, sticky="ns", padx=(0, 12), pady=12)
         self.source_list.configure(yscrollcommand=source_scroll.set)
 
+        selected_path_row = ttk.Frame(self.source_box)
+        selected_path_row.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 12))
+        selected_path_row.columnconfigure(1, weight=1)
+        self.selected_remote_path_label = ttk.Label(selected_path_row, text=self.tr("selected_remote_path"))
+        self.selected_remote_path_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.localized_widgets.append((self.selected_remote_path_label, "selected_remote_path"))
+        self.selected_remote_path_entry = ttk.Entry(selected_path_row, textvariable=self.selected_remote_path_var)
+        self.selected_remote_path_entry.grid(row=0, column=1, sticky="ew")
+        self.apply_remote_path_button = ttk.Button(
+            selected_path_row,
+            text=self.tr("apply_remote_path"),
+            command=self.apply_selected_remote_path,
+        )
+        self.apply_remote_path_button.grid(row=0, column=2, sticky="ew", padx=(8, 0))
+        self.localized_widgets.append((self.apply_remote_path_button, "apply_remote_path"))
+
         source_buttons = ttk.Frame(self.source_box)
-        source_buttons.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 12))
+        source_buttons.grid(row=2, column=0, columnspan=2, sticky="ew", padx=12, pady=(0, 12))
         for column in range(3):
             source_buttons.columnconfigure(column, weight=1)
         self.add_button = ttk.Button(source_buttons, text=self.tr("add"), command=self.add_source)
@@ -650,28 +712,72 @@ class DeckShareApp(ttk.Frame):
             self.identity_button.configure(state="disabled")
 
     def _load_sources(self) -> None:
-        for source in self.settings.sources:
-            self.source_list.insert("end", source)
+        self.refresh_source_list()
+
+    def format_source_item(self, item: TransferItem) -> str:
+        return f"{item.local_path}  ->  {item.remote_path}"
+
+    def refresh_source_list(self, selected_index: int | None = None) -> None:
+        self.source_list.delete(0, "end")
+        for item in self.source_items:
+            self.source_list.insert("end", self.format_source_item(item))
+
+        if selected_index is not None and self.source_items:
+            index = min(selected_index, len(self.source_items) - 1)
+            self.source_list.selection_set(index)
+            self.source_list.activate(index)
+            self.source_list.see(index)
+        self.update_selected_source_path()
+
+    def update_selected_source_path(self, _event: tk.Event | None = None) -> None:
+        selected = self.source_list.curselection()
+        if not selected:
+            self.selected_remote_path_var.set("")
+            return
+        self.selected_remote_path_var.set(self.source_items[selected[0]].remote_path)
+
+    def apply_selected_remote_path(self) -> None:
+        self.sync_selected_remote_path()
+        selected = self.source_list.curselection()
+        self.refresh_source_list(selected[0] if selected else None)
+        self.save_settings()
+
+    def sync_selected_remote_path(self) -> None:
+        selected = self.source_list.curselection()
+        if not selected:
+            return
+
+        index = selected[0]
+        self.source_items[index].remote_path = normalize_remote_path(self.selected_remote_path_var.get())
+        self.selected_remote_path_var.set(self.source_items[index].remote_path)
 
     def add_source(self) -> None:
         selected = filedialog.askdirectory(title=self.tr("dialog_select_dir"))
         if not selected:
             return
         normalized = str(Path(selected))
-        existing = set(self.source_list.get(0, "end"))
+        existing = {source.local_path for source in self.source_items}
         if normalized not in existing:
-            self.source_list.insert("end", normalized)
+            self.source_items.append(
+                TransferItem(
+                    local_path=normalized,
+                    remote_path=normalize_remote_path(self.remote_path_var.get()),
+                )
+            )
+            self.refresh_source_list(len(self.source_items) - 1)
             self.save_settings()
 
     def remove_source(self) -> None:
         selected = list(self.source_list.curselection())
         selected.reverse()
         for index in selected:
-            self.source_list.delete(index)
+            del self.source_items[index]
+        self.refresh_source_list(selected[-1] if selected else None)
         self.save_settings()
 
     def clear_sources(self) -> None:
-        self.source_list.delete(0, "end")
+        self.source_items.clear()
+        self.refresh_source_list()
         self.save_settings()
 
     def choose_identity(self) -> None:
@@ -681,6 +787,8 @@ class DeckShareApp(ttk.Frame):
             self.save_settings()
 
     def collect_settings(self, validate_auth: bool = True) -> Settings | None:
+        self.sync_selected_remote_path()
+
         try:
             port = int(self.port_var.get().strip())
         except ValueError:
@@ -718,7 +826,7 @@ class DeckShareApp(ttk.Frame):
             auth_method=auth_method,
             language=self.language_var.get() if self.language_var.get() in TRANSLATIONS else LANG_RU,
             identity_file=identity_file,
-            sources=list(self.source_list.get(0, "end")),
+            sources=list(self.source_items),
         )
 
     def collect_secret(self) -> str | None:

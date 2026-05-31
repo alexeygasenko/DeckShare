@@ -33,7 +33,7 @@ python deckshare.py
 
 You can also double-click `install_requirements.bat` once, then use `run.bat`.
 
-Add Windows directories, check SSH, then press **Передать**. Settings are saved in `%APPDATA%\DeckShare\config.json`. If that location is not writable, DeckShare falls back to `.deckshare\config.json` next to the app.
+Add Windows directories, choose a Deck destination for each selected folder, check SSH, then press **Передать**. The default Deck path is used for newly added folders, but every folder can be pointed to its own Deck directory. Settings are saved in `%APPDATA%\DeckShare\config.json`. If that location is not writable, DeckShare falls back to `.deckshare\config.json` next to the app.
 
 ## Notes
 
