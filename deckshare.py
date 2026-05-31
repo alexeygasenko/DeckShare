@@ -394,7 +394,7 @@ class SftpRunner:
 
                 source_path = Path(source.local_path)
                 name = source_path.name
-                remote_root = posixpath.join(source.remote_path, name)
+                remote_root = source.remote_path
                 self._emit("info", self.tr("log_processing_folder", index=index, total=total, name=name))
                 source_uploaded, source_skipped = self.upload_directory(source_path, remote_root)
                 uploaded += source_uploaded
