@@ -69,7 +69,7 @@ TRANSLATIONS = {
         "language": "Язык",
         "log_connecting": "Подключаюсь к {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Обрабатываю папку: {name}",
-        "log_hashing": "Проверяю загруженный файл: {path}",
+        "log_hashing": "Проверяю временный файл после загрузки: {path}",
         "log_password_deleted": "Сохраненный пароль удален.",
         "log_password_loaded": "Сохраненный пароль загружен из системного хранилища.",
         "log_password_saved": "Пароль сохранен в системном хранилище.",
@@ -136,7 +136,7 @@ TRANSLATIONS = {
         "language": "Language",
         "log_connecting": "Connecting to {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Processing folder: {name}",
-        "log_hashing": "Verifying uploaded file: {path}",
+        "log_hashing": "Verifying temporary file after upload: {path}",
         "log_password_deleted": "Saved password deleted.",
         "log_password_loaded": "Saved password loaded from the system credential store.",
         "log_password_saved": "Password saved in the system credential store.",
@@ -636,7 +636,6 @@ class SftpRunner:
     def upload_file(self, task: UploadTask) -> None:
         assert self.sftp is not None
         self.remove_remote_file(task.temp_path)
-        local_hash = self.local_sha256(task.local_path)
         started_at = time.monotonic()
         last_progress_at = 0.0
 
@@ -675,6 +674,7 @@ class SftpRunner:
         upload_elapsed = max(time.monotonic() - started_at, 0.001)
         self._emit("output", self.tr("log_hashing", path=task.temp_path))
         temp_attrs = self.remote_stat(task.temp_path)
+        local_hash = self.local_sha256(task.local_path)
         temp_hash = self.remote_sha256(task.temp_path)
         if temp_attrs is None or temp_attrs.st_size != task.size or temp_hash != local_hash:
             self.remove_remote_file(task.temp_path)
