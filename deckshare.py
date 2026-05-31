@@ -18,6 +18,8 @@ from tkinter import filedialog, messagebox, ttk
 APP_NAME = "DeckShare"
 KEYRING_SERVICE = APP_NAME
 DEFAULT_REMOTE_PATH = "/home/deck/DeckShare"
+SFTP_WINDOW_SIZE = 64 * 1024 * 1024
+SFTP_MAX_PACKET_SIZE = 1024 * 1024
 AUTH_PASSWORD = "password"
 AUTH_KEY = "key"
 LANG_RU = "ru"
@@ -410,7 +412,14 @@ class SftpRunner:
 
         client.connect(**connect_kwargs)
         self.client = client
-        self.sftp = client.open_sftp()
+        transport = client.get_transport()
+        if transport is None:
+            raise RuntimeError("SSH transport is not available")
+        self.sftp = paramiko.SFTPClient.from_transport(
+            transport,
+            window_size=SFTP_WINDOW_SIZE,
+            max_packet_size=SFTP_MAX_PACKET_SIZE,
+        )
 
     def describe_connection_error(self, settings: Settings, error: Exception) -> str:
         if isinstance(error, socket.gaierror):
@@ -602,6 +611,7 @@ class SftpRunner:
 
                 progress_callback(0, file_size)
                 self.sftp.put(str(local_file), temp_file, callback=progress_callback)
+                upload_elapsed = max(time.monotonic() - started_at, 0.001)
                 self._emit("output", self.tr("log_hashing", path=temp_file))
                 temp_attrs = self.remote_stat(temp_file)
                 temp_hash = self.remote_sha256(temp_file)
@@ -611,8 +621,7 @@ class SftpRunner:
 
                 self.replace_remote_file(temp_file, remote_file)
                 uploaded += 1
-                elapsed = max(time.monotonic() - started_at, 0.001)
-                speed = format_transfer_speed(file_size / elapsed)
+                speed = format_transfer_speed(file_size / upload_elapsed)
                 self._emit("output", self.tr("log_uploaded", path=remote_file, speed=speed))
 
         return uploaded, skipped
