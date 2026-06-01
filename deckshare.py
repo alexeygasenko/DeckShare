@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -22,6 +23,8 @@ KEYRING_SERVICE = APP_NAME
 DEFAULT_REMOTE_PATH = "/home/deck/DeckShare"
 SFTP_WINDOW_SIZE = 64 * 1024 * 1024
 SFTP_MAX_PACKET_SIZE = 1024 * 1024
+MIN_PARALLEL_TRANSFERS = 1
+MAX_PARALLEL_TRANSFERS = 8
 AUTH_PASSWORD = "password"
 AUTH_KEY = "key"
 ENGINE_PARAMIKO = "paramiko"
@@ -89,6 +92,7 @@ TRANSLATIONS = {
         "log_uploading": "Передается: {path} - {percent}% - {speed} - осталось: файл {file_eta}, всего {total_eta}",
         "passphrase": "Фраза ключа",
         "password": "Пароль",
+        "parallel_transfers": "Параллельных файлов",
         "port": "Порт",
         "remote_path": "Путь на Deck",
         "remote_path_default": "Путь на Deck по умолчанию",
@@ -162,6 +166,7 @@ TRANSLATIONS = {
         "log_uploading": "Uploading: {path} - {percent}% - {speed} - ETA: file {file_eta}, total {total_eta}",
         "passphrase": "Key passphrase",
         "password": "Password",
+        "parallel_transfers": "Parallel files",
         "port": "Port",
         "remote_path": "Deck path",
         "remote_path_default": "Default Deck path",
@@ -326,6 +331,15 @@ class UploadTask:
 
 
 @dataclass
+class TransferProgress:
+    total_bytes: int = 0
+    completed_bytes: int = 0
+    started_at: float = 0.0
+    active_bytes: dict[int, int] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+@dataclass
 class Settings:
     host: str = "steamdeck.local"
     username: str = "deck"
@@ -333,6 +347,7 @@ class Settings:
     remote_path: str = DEFAULT_REMOTE_PATH
     auth_method: str = AUTH_PASSWORD
     transfer_engine: str = ENGINE_PARAMIKO
+    parallel_transfers: int = 1
     language: str = LANG_RU
     identity_file: str = ""
     save_password: bool = False
@@ -366,6 +381,14 @@ class Settings:
         settings.auth_method = auth_method if auth_method in {AUTH_PASSWORD, AUTH_KEY} else AUTH_PASSWORD
         transfer_engine = str(raw.get("transfer_engine") or settings.transfer_engine)
         settings.transfer_engine = transfer_engine if transfer_engine in {ENGINE_PARAMIKO, ENGINE_OPENSSH} else ENGINE_PARAMIKO
+        try:
+            settings.parallel_transfers = int(raw.get("parallel_transfers") or settings.parallel_transfers)
+        except (TypeError, ValueError):
+            settings.parallel_transfers = 1
+        settings.parallel_transfers = max(
+            MIN_PARALLEL_TRANSFERS,
+            min(settings.parallel_transfers, MAX_PARALLEL_TRANSFERS),
+        )
         language = str(raw.get("language") or settings.language)
         settings.language = language if language in TRANSLATIONS else LANG_RU
         settings.identity_file = str(raw.get("identity_file") or "")
@@ -389,6 +412,7 @@ class Settings:
             "remote_path": self.remote_path,
             "auth_method": self.auth_method,
             "transfer_engine": self.transfer_engine,
+            "parallel_transfers": self.parallel_transfers,
             "language": self.language,
             "identity_file": self.identity_file,
             "save_password": self.save_password,
@@ -416,17 +440,50 @@ class SftpRunner:
         self.sftp = None
         self.current_process: subprocess.Popen[bytes] | None = None
         self.ssh_path = find_windows_openssh("ssh")
-        self.transfer_started_at = 0.0
-        self.transfer_total_bytes = 0
-        self.transfer_completed_bytes = 0
+        self.transfer_progress = TransferProgress()
+        self.child_runners: list[SftpRunner] = []
+        self.child_lock = threading.Lock()
 
     def stop(self) -> None:
         self.cancel_event.set()
         if self.current_process and self.current_process.poll() is None:
             self.current_process.terminate()
+        with self.child_lock:
+            children = list(self.child_runners)
+        for child in children:
+            child.stop()
 
     def _emit(self, level: str, text: str) -> None:
         self.log.put((level, text))
+
+    def register_child(self, child: "SftpRunner") -> None:
+        with self.child_lock:
+            self.child_runners.append(child)
+
+    def unregister_child(self, child: "SftpRunner") -> None:
+        with self.child_lock:
+            if child in self.child_runners:
+                self.child_runners.remove(child)
+
+    def start_transfer_progress(self, total_bytes: int) -> None:
+        self.transfer_progress = TransferProgress(total_bytes=total_bytes, started_at=time.monotonic())
+
+    def progress_snapshot(self, task: UploadTask, current_file_bytes: int) -> tuple[int, float, int]:
+        with self.transfer_progress.lock:
+            self.transfer_progress.active_bytes[id(task)] = current_file_bytes
+            total_sent = self.transfer_progress.completed_bytes + sum(self.transfer_progress.active_bytes.values())
+            started_at = self.transfer_progress.started_at
+            total_bytes = self.transfer_progress.total_bytes
+        return total_sent, started_at, total_bytes
+
+    def mark_task_completed(self, task: UploadTask) -> None:
+        with self.transfer_progress.lock:
+            self.transfer_progress.active_bytes.pop(id(task), None)
+            self.transfer_progress.completed_bytes += task.size
+
+    def clear_task_progress(self, task: UploadTask) -> None:
+        with self.transfer_progress.lock:
+            self.transfer_progress.active_bytes.pop(id(task), None)
 
     def _require_paramiko(self):
         try:
@@ -558,16 +615,8 @@ class SftpRunner:
                 upload_tasks.extend(source_tasks)
                 skipped += source_skipped
 
-            uploaded = 0
-            self.transfer_completed_bytes = 0
-            self.transfer_total_bytes = sum(task.size for task in upload_tasks)
-            self.transfer_started_at = time.monotonic()
-            for task in upload_tasks:
-                if self.cancel_event.is_set():
-                    self._emit("error", self.tr("error_stopped"))
-                    return False
-                self.upload_file(task)
-                uploaded += 1
+            self.start_transfer_progress(sum(task.size for task in upload_tasks))
+            uploaded = self.upload_tasks_paramiko(settings, secret, upload_tasks)
 
             self._emit("success", self.tr("success_transfer", uploaded=uploaded, skipped=skipped))
             return True
@@ -693,6 +742,12 @@ class SftpRunner:
     def replace_remote_file_openssh(self, settings: Settings, temp_path: str, final_path: str) -> None:
         self.run_openssh(settings, f"mv -f -- {quote_posix(temp_path)} {quote_posix(final_path)}")
 
+    def bounded_parallelism(self, settings: Settings, task_count: int) -> int:
+        return max(
+            MIN_PARALLEL_TRANSFERS,
+            min(settings.parallel_transfers, task_count, MAX_PARALLEL_TRANSFERS),
+        )
+
     def transfer_openssh(self, settings: Settings) -> bool:
         if settings.auth_method != AUTH_KEY:
             self._emit("error", self.tr("error_openssh_key_required"))
@@ -730,16 +785,8 @@ class SftpRunner:
                 upload_tasks.extend(source_tasks)
                 skipped += source_skipped
 
-            uploaded = 0
-            self.transfer_completed_bytes = 0
-            self.transfer_total_bytes = sum(task.size for task in upload_tasks)
-            self.transfer_started_at = time.monotonic()
-            for task in upload_tasks:
-                if self.cancel_event.is_set():
-                    self._emit("error", self.tr("error_stopped"))
-                    return False
-                self.upload_file_openssh(settings, task)
-                uploaded += 1
+            self.start_transfer_progress(sum(task.size for task in upload_tasks))
+            uploaded = self.upload_tasks_openssh(settings, upload_tasks)
 
             self._emit("success", self.tr("success_transfer", uploaded=uploaded, skipped=skipped))
             return True
@@ -798,6 +845,51 @@ class SftpRunner:
 
         return tasks, skipped
 
+    def upload_tasks_paramiko(self, settings: Settings, secret: str, upload_tasks: list[UploadTask]) -> int:
+        if not upload_tasks:
+            return 0
+
+        parallelism = self.bounded_parallelism(settings, len(upload_tasks))
+        if parallelism == 1:
+            uploaded = 0
+            for task in upload_tasks:
+                if self.cancel_event.is_set():
+                    raise RuntimeError(self.tr("error_stopped"))
+                self.upload_file(task)
+                uploaded += 1
+            return uploaded
+
+        self.close()
+
+        def worker(task: UploadTask) -> int:
+            child = SftpRunner(self.log, self.cancel_event, self.tr)
+            child.transfer_progress = self.transfer_progress
+            self.register_child(child)
+            try:
+                child.connect(settings, secret)
+                child.upload_file(task)
+                return 1
+            finally:
+                child.close()
+                self.unregister_child(child)
+
+        uploaded = 0
+        with ThreadPoolExecutor(max_workers=parallelism) as executor:
+            futures = [executor.submit(worker, task) for task in upload_tasks]
+            for future in as_completed(futures):
+                if self.cancel_event.is_set():
+                    for pending in futures:
+                        pending.cancel()
+                    raise RuntimeError(self.tr("error_stopped"))
+                try:
+                    uploaded += future.result()
+                except Exception:
+                    self.cancel_event.set()
+                    for pending in futures:
+                        pending.cancel()
+                    raise
+        return uploaded
+
     def upload_file(self, task: UploadTask) -> None:
         assert self.sftp is not None
         self.remove_remote_file(task.temp_path)
@@ -816,11 +908,11 @@ class SftpRunner:
 
             elapsed = max(now - started_at, 0.001)
             current_speed = sent_bytes / elapsed
-            total_sent = self.transfer_completed_bytes + sent_bytes
-            overall_elapsed = max(now - self.transfer_started_at, 0.001)
+            total_sent, transfer_started_at, transfer_total_bytes = self.progress_snapshot(task, sent_bytes)
+            overall_elapsed = max(now - transfer_started_at, 0.001)
             overall_speed = total_sent / overall_elapsed if total_sent else 0
             file_eta = format_duration((total - sent_bytes) / current_speed) if current_speed > 0 else "--"
-            total_remaining = max(self.transfer_total_bytes - total_sent, 0)
+            total_remaining = max(transfer_total_bytes - total_sent, 0)
             total_eta = format_duration(total_remaining / overall_speed) if overall_speed > 0 else "--"
             speed = format_transfer_speed(current_speed)
             percent = format_transfer_percent(sent_bytes, total)
@@ -858,9 +950,10 @@ class SftpRunner:
             self.replace_remote_file(task.temp_path, task.remote_path)
         except Exception:
             self.remove_remote_file(task.temp_path)
+            self.clear_task_progress(task)
             raise
 
-        self.transfer_completed_bytes += task.size
+        self.mark_task_completed(task)
         speed = format_transfer_speed(task.size / upload_elapsed)
         self._emit("output", self.tr("log_uploaded", path=task.remote_path, speed=speed))
 
@@ -919,6 +1012,47 @@ class SftpRunner:
 
         return tasks, skipped
 
+    def upload_tasks_openssh(self, settings: Settings, upload_tasks: list[UploadTask]) -> int:
+        if not upload_tasks:
+            return 0
+
+        parallelism = self.bounded_parallelism(settings, len(upload_tasks))
+        if parallelism == 1:
+            uploaded = 0
+            for task in upload_tasks:
+                if self.cancel_event.is_set():
+                    raise RuntimeError(self.tr("error_stopped"))
+                self.upload_file_openssh(settings, task)
+                uploaded += 1
+            return uploaded
+
+        def worker(task: UploadTask) -> int:
+            child = SftpRunner(self.log, self.cancel_event, self.tr)
+            child.transfer_progress = self.transfer_progress
+            self.register_child(child)
+            try:
+                child.upload_file_openssh(settings, task)
+                return 1
+            finally:
+                self.unregister_child(child)
+
+        uploaded = 0
+        with ThreadPoolExecutor(max_workers=parallelism) as executor:
+            futures = [executor.submit(worker, task) for task in upload_tasks]
+            for future in as_completed(futures):
+                if self.cancel_event.is_set():
+                    for pending in futures:
+                        pending.cancel()
+                    raise RuntimeError(self.tr("error_stopped"))
+                try:
+                    uploaded += future.result()
+                except Exception:
+                    self.cancel_event.set()
+                    for pending in futures:
+                        pending.cancel()
+                    raise
+        return uploaded
+
     def upload_file_openssh(self, settings: Settings, task: UploadTask) -> None:
         self.remove_remote_file_openssh(settings, task.temp_path)
         started_at = time.monotonic()
@@ -944,11 +1078,11 @@ class SftpRunner:
 
             elapsed = max(now - started_at, 0.001)
             current_speed = sent_bytes / elapsed
-            total_sent = self.transfer_completed_bytes + sent_bytes
-            overall_elapsed = max(now - self.transfer_started_at, 0.001)
+            total_sent, transfer_started_at, transfer_total_bytes = self.progress_snapshot(task, sent_bytes)
+            overall_elapsed = max(now - transfer_started_at, 0.001)
             overall_speed = total_sent / overall_elapsed if total_sent else 0
             file_eta = format_duration((task.size - sent_bytes) / current_speed) if current_speed > 0 else "--"
-            total_remaining = max(self.transfer_total_bytes - total_sent, 0)
+            total_remaining = max(transfer_total_bytes - total_sent, 0)
             total_eta = format_duration(total_remaining / overall_speed) if overall_speed > 0 else "--"
             speed = format_transfer_speed(current_speed)
             percent = format_transfer_percent(sent_bytes, task.size)
@@ -988,31 +1122,38 @@ class SftpRunner:
                 self.remove_remote_file_openssh(settings, task.temp_path)
             except Exception:
                 pass
+            self.clear_task_progress(task)
             raise
         finally:
             self.current_process = None
 
-        if return_code != 0:
-            error = (stderr or stdout).decode("utf-8", errors="replace").strip() or f"exit code {return_code}"
-            raise RuntimeError(self.tr("error_openssh_command_failed", error=error))
+        try:
+            if return_code != 0:
+                error = (stderr or stdout).decode("utf-8", errors="replace").strip() or f"exit code {return_code}"
+                raise RuntimeError(self.tr("error_openssh_command_failed", error=error))
 
-        emit_progress(force=True)
-        upload_elapsed = max(time.monotonic() - started_at, 0.001)
-        self._emit("output", self.tr("log_hashing", path=task.temp_path))
-        if self.cancel_event.is_set():
-            self.remove_remote_file_openssh(settings, task.temp_path)
-            raise RuntimeError(self.tr("error_stopped"))
-        temp_size = self.remote_stat_openssh(settings, task.temp_path)
-        temp_hash = self.remote_sha256_openssh(settings, task.temp_path)
-        if self.cancel_event.is_set():
-            self.remove_remote_file_openssh(settings, task.temp_path)
-            raise RuntimeError(self.tr("error_stopped"))
-        if temp_size != task.size or temp_hash != digest.hexdigest():
-            self.remove_remote_file_openssh(settings, task.temp_path)
-            raise RuntimeError(self.tr("error_upload_verify_failed", path=task.remote_path))
+            emit_progress(force=True)
+            upload_elapsed = max(time.monotonic() - started_at, 0.001)
+            self._emit("output", self.tr("log_hashing", path=task.temp_path))
+            if self.cancel_event.is_set():
+                raise RuntimeError(self.tr("error_stopped"))
+            temp_size = self.remote_stat_openssh(settings, task.temp_path)
+            temp_hash = self.remote_sha256_openssh(settings, task.temp_path)
+            if self.cancel_event.is_set():
+                raise RuntimeError(self.tr("error_stopped"))
+            if temp_size != task.size or temp_hash != digest.hexdigest():
+                raise RuntimeError(self.tr("error_upload_verify_failed", path=task.remote_path))
 
-        self.replace_remote_file_openssh(settings, task.temp_path, task.remote_path)
-        self.transfer_completed_bytes += task.size
+            self.replace_remote_file_openssh(settings, task.temp_path, task.remote_path)
+        except Exception:
+            try:
+                self.remove_remote_file_openssh(settings, task.temp_path)
+            except Exception:
+                pass
+            self.clear_task_progress(task)
+            raise
+
+        self.mark_task_completed(task)
         speed = format_transfer_speed(task.size / upload_elapsed)
         self._emit("output", self.tr("log_uploaded", path=task.remote_path, speed=speed))
 
@@ -1036,6 +1177,7 @@ class DeckShareApp(ttk.Frame):
         self.selected_remote_path_var = tk.StringVar(value="")
         self.auth_method_var = tk.StringVar(value=self.settings.auth_method)
         self.transfer_engine_var = tk.StringVar(value=self.settings.transfer_engine)
+        self.parallel_transfers_var = tk.StringVar(value=str(self.settings.parallel_transfers))
         self.language_var = tk.StringVar(value=self.settings.language)
         self.identity_var = tk.StringVar(value=self.settings.identity_file)
         self.password_var = tk.StringVar(value="")
@@ -1182,6 +1324,19 @@ class DeckShareApp(ttk.Frame):
         )
         self.engine_openssh_radio.grid(row=0, column=1, sticky="w", padx=(16, 0))
         self.localized_widgets.append((self.engine_openssh_radio, "engine_fast"))
+
+        self.parallel_transfers_label = ttk.Label(self.settings_box, text=self.tr("parallel_transfers"))
+        self.parallel_transfers_label.grid(row=9, column=0, sticky="w", padx=12, pady=6)
+        self.localized_widgets.append((self.parallel_transfers_label, "parallel_transfers"))
+        self.parallel_transfers_spin = ttk.Spinbox(
+            self.settings_box,
+            from_=MIN_PARALLEL_TRANSFERS,
+            to=MAX_PARALLEL_TRANSFERS,
+            textvariable=self.parallel_transfers_var,
+            width=6,
+            command=self.save_settings,
+        )
+        self.parallel_transfers_spin.grid(row=9, column=1, sticky="w", padx=12, pady=6)
 
         self.source_box = ttk.LabelFrame(self, text=self.tr("group_sources"))
         self.source_box.grid(row=1, column=1, rowspan=2, sticky="nsew")
@@ -1475,6 +1630,12 @@ class DeckShareApp(ttk.Frame):
         transfer_engine = self.transfer_engine_var.get()
         if transfer_engine not in {ENGINE_PARAMIKO, ENGINE_OPENSSH}:
             transfer_engine = ENGINE_PARAMIKO
+        try:
+            parallel_transfers = int(self.parallel_transfers_var.get().strip())
+        except ValueError:
+            parallel_transfers = 1
+        parallel_transfers = max(MIN_PARALLEL_TRANSFERS, min(parallel_transfers, MAX_PARALLEL_TRANSFERS))
+        self.parallel_transfers_var.set(str(parallel_transfers))
 
         if validate_auth and auth_method == AUTH_KEY and transfer_engine != ENGINE_OPENSSH and not identity_file:
             messagebox.showerror(APP_NAME, self.tr("error_auth_key_missing"))
@@ -1497,6 +1658,7 @@ class DeckShareApp(ttk.Frame):
             remote_path=normalize_remote_path(self.remote_path_var.get()),
             auth_method=auth_method,
             transfer_engine=transfer_engine,
+            parallel_transfers=parallel_transfers,
             language=self.language_var.get() if self.language_var.get() in TRANSLATIONS else LANG_RU,
             identity_file=identity_file,
             save_password=should_save_password,
