@@ -5,7 +5,9 @@ import json
 import os
 import posixpath
 import queue
+import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -22,6 +24,8 @@ SFTP_WINDOW_SIZE = 64 * 1024 * 1024
 SFTP_MAX_PACKET_SIZE = 1024 * 1024
 AUTH_PASSWORD = "password"
 AUTH_KEY = "key"
+ENGINE_PARAMIKO = "paramiko"
+ENGINE_OPENSSH = "openssh"
 LANG_RU = "ru"
 LANG_EN = "en"
 LOCAL_DEPENDENCY_DIR = Path(__file__).resolve().parent / ".deps"
@@ -53,6 +57,9 @@ TRANSLATIONS = {
         "error_keyring_missing": "Не установлен пакет keyring. Запустите install_requirements.bat.",
         "error_keyring_read_failed": "Не удалось прочитать сохраненный пароль: {error}",
         "error_keyring_save_failed": "Не удалось сохранить пароль: {error}",
+        "error_openssh_command_failed": "Команда OpenSSH завершилась с ошибкой: {error}",
+        "error_openssh_key_required": "Fast OpenSSH работает только с входом по SSH-ключу.",
+        "error_openssh_missing": "Не найден {name}. Установите OpenSSH Client в Windows.",
         "error_paramiko_missing": "Не установлен пакет paramiko. Запустите install_requirements.bat.",
         "error_port_number": "Порт должен быть числом.",
         "error_port_range": "Порт должен быть в диапазоне 1-65535.",
@@ -66,6 +73,8 @@ TRANSLATIONS = {
         "group_steam_deck": "Steam Deck",
         "host": "Хост",
         "identity": "SSH-ключ",
+        "engine_fast": "Fast OpenSSH",
+        "engine_paramiko": "Compatible SFTP",
         "language": "Язык",
         "log_connecting": "Подключаюсь к {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Обрабатываю папку: {name}",
@@ -95,6 +104,7 @@ TRANSLATIONS = {
         "success_transfer": "Передача завершена. Отправлено: {uploaded}, пропущено: {skipped}.",
         "test_ssh": "Проверить SSH",
         "transfer": "Передать",
+        "transfer_engine": "Движок передачи",
         "user": "Пользователь",
         "stop": "Остановить",
     },
@@ -120,6 +130,9 @@ TRANSLATIONS = {
         "error_keyring_missing": "The keyring package is not installed. Run install_requirements.bat.",
         "error_keyring_read_failed": "Could not read the saved password: {error}",
         "error_keyring_save_failed": "Could not save the password: {error}",
+        "error_openssh_command_failed": "OpenSSH command failed: {error}",
+        "error_openssh_key_required": "Fast OpenSSH works only with SSH key login.",
+        "error_openssh_missing": "{name} was not found. Install OpenSSH Client in Windows.",
         "error_paramiko_missing": "The paramiko package is not installed. Run install_requirements.bat.",
         "error_port_number": "Port must be a number.",
         "error_port_range": "Port must be in the 1-65535 range.",
@@ -133,6 +146,8 @@ TRANSLATIONS = {
         "group_steam_deck": "Steam Deck",
         "host": "Host",
         "identity": "SSH key",
+        "engine_fast": "Fast OpenSSH",
+        "engine_paramiko": "Compatible SFTP",
         "language": "Language",
         "log_connecting": "Connecting to {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Processing folder: {name}",
@@ -162,6 +177,7 @@ TRANSLATIONS = {
         "success_transfer": "Transfer complete. Uploaded: {uploaded}, skipped: {skipped}.",
         "test_ssh": "Check SSH",
         "transfer": "Transfer",
+        "transfer_engine": "Transfer engine",
         "user": "User",
         "stop": "Stop",
     },
@@ -260,6 +276,19 @@ def quote_posix(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
 
 
+def find_windows_openssh(name: str) -> str:
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    candidate = Path(system_root) / "System32" / "OpenSSH" / f"{name}.exe"
+    if candidate.exists():
+        return str(candidate)
+
+    found = shutil.which(name)
+    if found:
+        return found
+
+    return f"{name}.exe"
+
+
 @dataclass
 class TransferItem:
     local_path: str
@@ -303,6 +332,7 @@ class Settings:
     port: int = 22
     remote_path: str = DEFAULT_REMOTE_PATH
     auth_method: str = AUTH_PASSWORD
+    transfer_engine: str = ENGINE_PARAMIKO
     language: str = LANG_RU
     identity_file: str = ""
     save_password: bool = False
@@ -334,6 +364,8 @@ class Settings:
         settings.remote_path = normalize_remote_path(str(raw.get("remote_path") or settings.remote_path))
         auth_method = str(raw.get("auth_method") or settings.auth_method)
         settings.auth_method = auth_method if auth_method in {AUTH_PASSWORD, AUTH_KEY} else AUTH_PASSWORD
+        transfer_engine = str(raw.get("transfer_engine") or settings.transfer_engine)
+        settings.transfer_engine = transfer_engine if transfer_engine in {ENGINE_PARAMIKO, ENGINE_OPENSSH} else ENGINE_PARAMIKO
         language = str(raw.get("language") or settings.language)
         settings.language = language if language in TRANSLATIONS else LANG_RU
         settings.identity_file = str(raw.get("identity_file") or "")
@@ -356,6 +388,7 @@ class Settings:
             "port": self.port,
             "remote_path": self.remote_path,
             "auth_method": self.auth_method,
+            "transfer_engine": self.transfer_engine,
             "language": self.language,
             "identity_file": self.identity_file,
             "save_password": self.save_password,
@@ -381,13 +414,16 @@ class SftpRunner:
         self.tr = translate
         self.client = None
         self.sftp = None
+        self.current_process: subprocess.Popen[bytes] | None = None
+        self.ssh_path = find_windows_openssh("ssh")
         self.transfer_started_at = 0.0
         self.transfer_total_bytes = 0
         self.transfer_completed_bytes = 0
 
     def stop(self) -> None:
         self.cancel_event.set()
-        self.close()
+        if self.current_process and self.current_process.poll() is None:
+            self.current_process.terminate()
 
     def _emit(self, level: str, text: str) -> None:
         self.log.put((level, text))
@@ -450,6 +486,17 @@ class SftpRunner:
         return str(error)
 
     def test_connection(self, settings: Settings, secret: str) -> bool:
+        if settings.transfer_engine == ENGINE_OPENSSH:
+            try:
+                output = self.run_openssh(settings, "echo DeckShare connection ok")
+                if output:
+                    self._emit("output", output)
+                self._emit("success", self.tr("success_connection"))
+                return True
+            except Exception as exc:  # noqa: BLE001 - surface connection errors in UI.
+                self._emit("error", self.tr("error_connect_failed", error=self.describe_connection_error(settings, exc)))
+                return False
+
         try:
             self.connect(settings, secret)
             assert self.client is not None
@@ -469,6 +516,9 @@ class SftpRunner:
             self.close()
 
     def transfer(self, settings: Settings, secret: str) -> bool:
+        if settings.transfer_engine == ENGINE_OPENSSH:
+            return self.transfer_openssh(settings)
+
         if not settings.sources:
             self._emit("error", self.tr("error_no_sources"))
             return False
@@ -582,6 +632,121 @@ class SftpRunner:
         self.remove_remote_file(final_path)
         self.sftp.rename(temp_path, final_path)
 
+    def openssh_args(self, settings: Settings) -> list[str]:
+        if not Path(self.ssh_path).exists():
+            raise RuntimeError(self.tr("error_openssh_missing", name="ssh.exe"))
+
+        args = [
+            self.ssh_path,
+            "-p",
+            str(settings.port),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+        ]
+        if settings.identity_file:
+            args.extend(["-i", settings.identity_file])
+        args.append(f"{settings.username}@{settings.host}")
+        return args
+
+    def run_openssh(self, settings: Settings, command: str) -> str:
+        try:
+            result = subprocess.run(
+                self.openssh_args(settings) + [command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        except Exception as exc:  # noqa: BLE001 - show subprocess failures in UI.
+            raise RuntimeError(self.tr("error_openssh_command_failed", error=exc)) from exc
+
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout).strip() or f"exit code {result.returncode}"
+            raise RuntimeError(self.tr("error_openssh_command_failed", error=error))
+        return result.stdout.strip()
+
+    def ensure_remote_dir_openssh(self, settings: Settings, remote_path: str) -> None:
+        self.run_openssh(settings, f"mkdir -p -- {quote_posix(remote_path)}")
+
+    def remote_stat_openssh(self, settings: Settings, remote_path: str) -> int | None:
+        output = self.run_openssh(
+            settings,
+            f"if [ -e {quote_posix(remote_path)} ]; then stat -c %s -- {quote_posix(remote_path)}; fi",
+        )
+        if not output:
+            return None
+        try:
+            return int(output.splitlines()[-1])
+        except ValueError:
+            return None
+
+    def remote_sha256_openssh(self, settings: Settings, remote_path: str) -> str | None:
+        output = self.run_openssh(settings, f"sha256sum -- {quote_posix(remote_path)}")
+        return output.split()[0].lower() if output else None
+
+    def remove_remote_file_openssh(self, settings: Settings, remote_path: str) -> None:
+        self.run_openssh(settings, f"rm -f -- {quote_posix(remote_path)}")
+
+    def replace_remote_file_openssh(self, settings: Settings, temp_path: str, final_path: str) -> None:
+        self.run_openssh(settings, f"mv -f -- {quote_posix(temp_path)} {quote_posix(final_path)}")
+
+    def transfer_openssh(self, settings: Settings) -> bool:
+        if settings.auth_method != AUTH_KEY:
+            self._emit("error", self.tr("error_openssh_key_required"))
+            return False
+
+        if not settings.sources:
+            self._emit("error", self.tr("error_no_sources"))
+            return False
+
+        valid_sources = [source for source in settings.sources if Path(source.local_path).is_dir()]
+        missing = [source for source in settings.sources if source not in valid_sources]
+        for source in missing:
+            self._emit("error", self.tr("error_missing_folder", source=source.local_path))
+
+        if not valid_sources:
+            return False
+
+        try:
+            for source in valid_sources:
+                self.ensure_remote_dir_openssh(settings, source.remote_path)
+
+            total = len(valid_sources)
+            skipped = 0
+            upload_tasks: list[UploadTask] = []
+            for index, source in enumerate(valid_sources, start=1):
+                if self.cancel_event.is_set():
+                    self._emit("error", self.tr("error_stopped"))
+                    return False
+
+                source_path = Path(source.local_path)
+                name = source_path.name
+                remote_root = source.remote_path
+                self._emit("info", self.tr("log_processing_folder", index=index, total=total, name=name))
+                source_tasks, source_skipped = self.build_upload_tasks_openssh(settings, source_path, remote_root)
+                upload_tasks.extend(source_tasks)
+                skipped += source_skipped
+
+            uploaded = 0
+            self.transfer_completed_bytes = 0
+            self.transfer_total_bytes = sum(task.size for task in upload_tasks)
+            self.transfer_started_at = time.monotonic()
+            for task in upload_tasks:
+                if self.cancel_event.is_set():
+                    self._emit("error", self.tr("error_stopped"))
+                    return False
+                self.upload_file_openssh(settings, task)
+                uploaded += 1
+
+            self._emit("success", self.tr("success_transfer", uploaded=uploaded, skipped=skipped))
+            return True
+        except Exception as exc:  # noqa: BLE001 - surface transfer errors in UI.
+            self._emit("error", self.tr("error_transfer_failed", error=exc))
+            return False
+
     def build_upload_tasks(self, source_root: Path, remote_root: str) -> tuple[list[UploadTask], int]:
         assert self.sftp is not None
         tasks: list[UploadTask] = []
@@ -641,6 +806,9 @@ class SftpRunner:
 
         def progress_callback(sent_bytes: int, total_bytes: int) -> None:
             nonlocal last_progress_at
+            if self.cancel_event.is_set():
+                raise RuntimeError(self.tr("error_stopped"))
+
             now = time.monotonic()
             total = total_bytes or task.size
             if now - last_progress_at < 1 and sent_bytes < total:
@@ -669,18 +837,181 @@ class SftpRunner:
             )
             last_progress_at = now
 
-        progress_callback(0, task.size)
-        self.sftp.put(str(task.local_path), task.temp_path, callback=progress_callback)
+        try:
+            progress_callback(0, task.size)
+            self.sftp.put(str(task.local_path), task.temp_path, callback=progress_callback)
+            upload_elapsed = max(time.monotonic() - started_at, 0.001)
+            self._emit("output", self.tr("log_hashing", path=task.temp_path))
+            if self.cancel_event.is_set():
+                raise RuntimeError(self.tr("error_stopped"))
+            temp_attrs = self.remote_stat(task.temp_path)
+            local_hash = self.local_sha256(task.local_path)
+            if self.cancel_event.is_set():
+                raise RuntimeError(self.tr("error_stopped"))
+            temp_hash = self.remote_sha256(task.temp_path)
+            if self.cancel_event.is_set():
+                raise RuntimeError(self.tr("error_stopped"))
+            if temp_attrs is None or temp_attrs.st_size != task.size or temp_hash != local_hash:
+                self.remove_remote_file(task.temp_path)
+                raise RuntimeError(self.tr("error_upload_verify_failed", path=task.remote_path))
+
+            self.replace_remote_file(task.temp_path, task.remote_path)
+        except Exception:
+            self.remove_remote_file(task.temp_path)
+            raise
+
+        self.transfer_completed_bytes += task.size
+        speed = format_transfer_speed(task.size / upload_elapsed)
+        self._emit("output", self.tr("log_uploaded", path=task.remote_path, speed=speed))
+
+    def build_upload_tasks_openssh(
+        self,
+        settings: Settings,
+        source_root: Path,
+        remote_root: str,
+    ) -> tuple[list[UploadTask], int]:
+        tasks: list[UploadTask] = []
+        skipped = 0
+        self.ensure_remote_dir_openssh(settings, remote_root)
+
+        for local_dir, dir_names, file_names in os.walk(source_root):
+            if self.cancel_event.is_set():
+                return tasks, skipped
+
+            dir_names.sort()
+            file_names.sort()
+            relative_dir = Path(local_dir).relative_to(source_root)
+            remote_dir = remote_root if str(relative_dir) == "." else posixpath.join(
+                remote_root,
+                relative_dir.as_posix(),
+            )
+            self.ensure_remote_dir_openssh(settings, remote_dir)
+
+            for file_name in file_names:
+                if self.cancel_event.is_set():
+                    return tasks, skipped
+
+                local_file = Path(local_dir) / file_name
+                remote_file = posixpath.join(remote_dir, file_name)
+                temp_file = f"{remote_file}.deckshare-part"
+                file_size = local_file.stat().st_size
+                remote_size = self.remote_stat_openssh(settings, remote_file)
+
+                if remote_size is not None:
+                    if remote_size == file_size:
+                        skipped += 1
+                        self._emit("output", self.tr("log_skipped", path=remote_file))
+                        continue
+
+                    self._emit(
+                        "info",
+                        self.tr("log_reuploading", path=remote_file, reason=self.tr("log_reuploading_size")),
+                    )
+
+                tasks.append(
+                    UploadTask(
+                        local_path=local_file,
+                        remote_path=remote_file,
+                        temp_path=temp_file,
+                        size=file_size,
+                    )
+                )
+
+        return tasks, skipped
+
+    def upload_file_openssh(self, settings: Settings, task: UploadTask) -> None:
+        self.remove_remote_file_openssh(settings, task.temp_path)
+        started_at = time.monotonic()
+        last_progress_at = 0.0
+        sent_bytes = 0
+        digest = hashlib.sha256()
+        command = f"cat > {quote_posix(task.temp_path)}"
+        self.current_process = subprocess.Popen(
+            self.openssh_args(settings) + [command],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+
+        assert self.current_process.stdin is not None
+
+        def emit_progress(force: bool = False) -> None:
+            nonlocal last_progress_at
+            now = time.monotonic()
+            if not force and now - last_progress_at < 1 and sent_bytes < task.size:
+                return
+
+            elapsed = max(now - started_at, 0.001)
+            current_speed = sent_bytes / elapsed
+            total_sent = self.transfer_completed_bytes + sent_bytes
+            overall_elapsed = max(now - self.transfer_started_at, 0.001)
+            overall_speed = total_sent / overall_elapsed if total_sent else 0
+            file_eta = format_duration((task.size - sent_bytes) / current_speed) if current_speed > 0 else "--"
+            total_remaining = max(self.transfer_total_bytes - total_sent, 0)
+            total_eta = format_duration(total_remaining / overall_speed) if overall_speed > 0 else "--"
+            speed = format_transfer_speed(current_speed)
+            percent = format_transfer_percent(sent_bytes, task.size)
+            self._emit(
+                "progress",
+                self.tr(
+                    "log_uploading",
+                    path=task.remote_path,
+                    percent=percent,
+                    speed=speed,
+                    file_eta=file_eta,
+                    total_eta=total_eta,
+                ),
+            )
+            last_progress_at = now
+
+        try:
+            emit_progress(force=True)
+            with task.local_path.open("rb") as file:
+                for chunk in iter(lambda: file.read(1024 * 1024), b""):
+                    if self.cancel_event.is_set():
+                        self.current_process.terminate()
+                        raise RuntimeError(self.tr("error_stopped"))
+                    digest.update(chunk)
+                    self.current_process.stdin.write(chunk)
+                    sent_bytes += len(chunk)
+                    emit_progress()
+            self.current_process.stdin.close()
+            stdout = self.current_process.stdout.read() if self.current_process.stdout else b""
+            stderr = self.current_process.stderr.read() if self.current_process.stderr else b""
+            return_code = self.current_process.wait()
+        except Exception:
+            if self.current_process and self.current_process.poll() is None:
+                self.current_process.terminate()
+                self.current_process.wait(timeout=5)
+            try:
+                self.remove_remote_file_openssh(settings, task.temp_path)
+            except Exception:
+                pass
+            raise
+        finally:
+            self.current_process = None
+
+        if return_code != 0:
+            error = (stderr or stdout).decode("utf-8", errors="replace").strip() or f"exit code {return_code}"
+            raise RuntimeError(self.tr("error_openssh_command_failed", error=error))
+
+        emit_progress(force=True)
         upload_elapsed = max(time.monotonic() - started_at, 0.001)
         self._emit("output", self.tr("log_hashing", path=task.temp_path))
-        temp_attrs = self.remote_stat(task.temp_path)
-        local_hash = self.local_sha256(task.local_path)
-        temp_hash = self.remote_sha256(task.temp_path)
-        if temp_attrs is None or temp_attrs.st_size != task.size or temp_hash != local_hash:
-            self.remove_remote_file(task.temp_path)
+        if self.cancel_event.is_set():
+            self.remove_remote_file_openssh(settings, task.temp_path)
+            raise RuntimeError(self.tr("error_stopped"))
+        temp_size = self.remote_stat_openssh(settings, task.temp_path)
+        temp_hash = self.remote_sha256_openssh(settings, task.temp_path)
+        if self.cancel_event.is_set():
+            self.remove_remote_file_openssh(settings, task.temp_path)
+            raise RuntimeError(self.tr("error_stopped"))
+        if temp_size != task.size or temp_hash != digest.hexdigest():
+            self.remove_remote_file_openssh(settings, task.temp_path)
             raise RuntimeError(self.tr("error_upload_verify_failed", path=task.remote_path))
 
-        self.replace_remote_file(task.temp_path, task.remote_path)
+        self.replace_remote_file_openssh(settings, task.temp_path, task.remote_path)
         self.transfer_completed_bytes += task.size
         speed = format_transfer_speed(task.size / upload_elapsed)
         self._emit("output", self.tr("log_uploaded", path=task.remote_path, speed=speed))
@@ -704,6 +1035,7 @@ class DeckShareApp(ttk.Frame):
         self.remote_path_var = tk.StringVar(value=self.settings.remote_path)
         self.selected_remote_path_var = tk.StringVar(value="")
         self.auth_method_var = tk.StringVar(value=self.settings.auth_method)
+        self.transfer_engine_var = tk.StringVar(value=self.settings.transfer_engine)
         self.language_var = tk.StringVar(value=self.settings.language)
         self.identity_var = tk.StringVar(value=self.settings.identity_file)
         self.password_var = tk.StringVar(value="")
@@ -826,6 +1158,30 @@ class DeckShareApp(ttk.Frame):
         self.identity_entry.grid(row=0, column=0, sticky="ew")
         self.identity_button = ttk.Button(key_row, text="...", width=4, command=self.choose_identity)
         self.identity_button.grid(row=0, column=1, padx=(6, 0))
+
+        self.transfer_engine_label = ttk.Label(self.settings_box, text=self.tr("transfer_engine"))
+        self.transfer_engine_label.grid(row=8, column=0, sticky="w", padx=12, pady=6)
+        self.localized_widgets.append((self.transfer_engine_label, "transfer_engine"))
+        engine_row = ttk.Frame(self.settings_box)
+        engine_row.grid(row=8, column=1, sticky="ew", padx=12, pady=6)
+        self.engine_paramiko_radio = ttk.Radiobutton(
+            engine_row,
+            text=self.tr("engine_paramiko"),
+            value=ENGINE_PARAMIKO,
+            variable=self.transfer_engine_var,
+            command=self.update_auth_fields,
+        )
+        self.engine_paramiko_radio.grid(row=0, column=0, sticky="w")
+        self.localized_widgets.append((self.engine_paramiko_radio, "engine_paramiko"))
+        self.engine_openssh_radio = ttk.Radiobutton(
+            engine_row,
+            text=self.tr("engine_fast"),
+            value=ENGINE_OPENSSH,
+            variable=self.transfer_engine_var,
+            command=self.update_auth_fields,
+        )
+        self.engine_openssh_radio.grid(row=0, column=1, sticky="w", padx=(16, 0))
+        self.localized_widgets.append((self.engine_openssh_radio, "engine_fast"))
 
         self.source_box = ttk.LabelFrame(self, text=self.tr("group_sources"))
         self.source_box.grid(row=1, column=1, rowspan=2, sticky="nsew")
@@ -1008,11 +1364,15 @@ class DeckShareApp(ttk.Frame):
             self.identity_entry.configure(state="normal")
             self.identity_button.configure(state="normal")
             self.save_password_check.configure(state="disabled")
+            self.engine_openssh_radio.configure(state="normal")
         else:
+            if self.transfer_engine_var.get() == ENGINE_OPENSSH:
+                self.transfer_engine_var.set(ENGINE_PARAMIKO)
             self.password_label.configure(text=self.tr("password"))
             self.identity_entry.configure(state="disabled")
             self.identity_button.configure(state="disabled")
             self.save_password_check.configure(state="normal")
+            self.engine_openssh_radio.configure(state="disabled")
 
     def _load_sources(self) -> None:
         self.refresh_source_list()
@@ -1112,13 +1472,20 @@ class DeckShareApp(ttk.Frame):
         auth_method = self.auth_method_var.get()
         if auth_method not in {AUTH_PASSWORD, AUTH_KEY}:
             auth_method = AUTH_PASSWORD
+        transfer_engine = self.transfer_engine_var.get()
+        if transfer_engine not in {ENGINE_PARAMIKO, ENGINE_OPENSSH}:
+            transfer_engine = ENGINE_PARAMIKO
 
-        if validate_auth and auth_method == AUTH_KEY and not identity_file:
+        if validate_auth and auth_method == AUTH_KEY and transfer_engine != ENGINE_OPENSSH and not identity_file:
             messagebox.showerror(APP_NAME, self.tr("error_auth_key_missing"))
             return None
 
         if validate_auth and auth_method == AUTH_KEY and identity_file and not Path(identity_file).is_file():
             messagebox.showerror(APP_NAME, self.tr("error_identity_missing"))
+            return None
+
+        if validate_auth and transfer_engine == ENGINE_OPENSSH and auth_method != AUTH_KEY:
+            messagebox.showerror(APP_NAME, self.tr("error_openssh_key_required"))
             return None
 
         should_save_password = self.save_password_var.get() if auth_method == AUTH_PASSWORD else False
@@ -1129,6 +1496,7 @@ class DeckShareApp(ttk.Frame):
             port=port,
             remote_path=normalize_remote_path(self.remote_path_var.get()),
             auth_method=auth_method,
+            transfer_engine=transfer_engine,
             language=self.language_var.get() if self.language_var.get() in TRANSLATIONS else LANG_RU,
             identity_file=identity_file,
             save_password=should_save_password,
