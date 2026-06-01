@@ -78,7 +78,14 @@ TRANSLATIONS = {
         "identity": "SSH-ключ",
         "engine_fast": "Fast OpenSSH",
         "engine_paramiko": "Compatible SFTP",
+        "group_progress": "Прогресс",
         "language": "Язык",
+        "progress_column_destination": "Папка назначения",
+        "progress_column_eta": "ETA файла",
+        "progress_column_file": "Файл",
+        "progress_column_percent": "Процент",
+        "progress_column_speed": "Скорость",
+        "progress_total_eta": "Осталось всего: {eta}",
         "log_connecting": "Подключаюсь к {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Обрабатываю папку: {name}",
         "log_hashing": "Проверяю временный файл после загрузки: {path}",
@@ -152,7 +159,14 @@ TRANSLATIONS = {
         "identity": "SSH key",
         "engine_fast": "Fast OpenSSH",
         "engine_paramiko": "Compatible SFTP",
+        "group_progress": "Progress",
         "language": "Language",
+        "progress_column_destination": "Destination folder",
+        "progress_column_eta": "File ETA",
+        "progress_column_file": "File",
+        "progress_column_percent": "Percent",
+        "progress_column_speed": "Speed",
+        "progress_total_eta": "Total ETA: {eta}",
         "log_connecting": "Connecting to {user}@{host}:{port}",
         "log_processing_folder": "[{index}/{total}] Processing folder: {name}",
         "log_hashing": "Verifying temporary file after upload: {path}",
@@ -330,6 +344,22 @@ class UploadTask:
     size: int
 
 
+@dataclass(frozen=True)
+class ProgressUpdate:
+    task_id: str
+    file_name: str
+    destination: str
+    speed: str
+    percent: str
+    file_eta: str
+    total_eta: str
+
+
+@dataclass(frozen=True)
+class ProgressRemove:
+    task_id: str
+
+
 @dataclass
 class TransferProgress:
     total_bytes: int = 0
@@ -429,7 +459,7 @@ class Settings:
 class SftpRunner:
     def __init__(
         self,
-        log: queue.Queue[tuple[str, str]],
+        log: queue.Queue[tuple[str, object]],
         cancel_event: threading.Event,
         translate: callable,
     ) -> None:
@@ -456,6 +486,29 @@ class SftpRunner:
     def _emit(self, level: str, text: str) -> None:
         self.log.put((level, text))
 
+    def _emit_progress(
+        self,
+        task: UploadTask,
+        speed: str,
+        percent: str,
+        file_eta: str,
+        total_eta: str,
+    ) -> None:
+        self.log.put(
+            (
+                "progress",
+                ProgressUpdate(
+                    task_id=str(id(task)),
+                    file_name=posixpath.basename(task.remote_path) or task.local_path.name,
+                    destination=posixpath.dirname(task.remote_path) or "/",
+                    speed=speed,
+                    percent=f"{percent}%",
+                    file_eta=file_eta,
+                    total_eta=total_eta,
+                ),
+            )
+        )
+
     def register_child(self, child: "SftpRunner") -> None:
         with self.child_lock:
             self.child_runners.append(child)
@@ -480,10 +533,12 @@ class SftpRunner:
         with self.transfer_progress.lock:
             self.transfer_progress.active_bytes.pop(id(task), None)
             self.transfer_progress.completed_bytes += task.size
+        self.log.put(("progress_remove", ProgressRemove(str(id(task)))))
 
     def clear_task_progress(self, task: UploadTask) -> None:
         with self.transfer_progress.lock:
             self.transfer_progress.active_bytes.pop(id(task), None)
+        self.log.put(("progress_remove", ProgressRemove(str(id(task)))))
 
     def _require_paramiko(self):
         try:
@@ -916,17 +971,7 @@ class SftpRunner:
             total_eta = format_duration(total_remaining / overall_speed) if overall_speed > 0 else "--"
             speed = format_transfer_speed(current_speed)
             percent = format_transfer_percent(sent_bytes, total)
-            self._emit(
-                "progress",
-                self.tr(
-                    "log_uploading",
-                    path=task.remote_path,
-                    percent=percent,
-                    speed=speed,
-                    file_eta=file_eta,
-                    total_eta=total_eta,
-                ),
-            )
+            self._emit_progress(task, speed, percent, file_eta, total_eta)
             last_progress_at = now
 
         try:
@@ -1086,17 +1131,7 @@ class SftpRunner:
             total_eta = format_duration(total_remaining / overall_speed) if overall_speed > 0 else "--"
             speed = format_transfer_speed(current_speed)
             percent = format_transfer_percent(sent_bytes, task.size)
-            self._emit(
-                "progress",
-                self.tr(
-                    "log_uploading",
-                    path=task.remote_path,
-                    percent=percent,
-                    speed=speed,
-                    file_eta=file_eta,
-                    total_eta=total_eta,
-                ),
-            )
+            self._emit_progress(task, speed, percent, file_eta, total_eta)
             last_progress_at = now
 
         try:
@@ -1163,10 +1198,12 @@ class DeckShareApp(ttk.Frame):
         super().__init__(root, padding=16)
         self.root = root
         self.settings = Settings.load()
-        self.messages: queue.Queue[tuple[str, str]] = queue.Queue()
+        self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
         self.cancel_event = threading.Event()
         self.worker: threading.Thread | None = None
         self.localized_widgets: list[tuple[tk.Widget, str]] = []
+        self.progress_rows: dict[str, str] = {}
+        self.current_total_eta = "--"
         self.source_items: list[TransferItem] = list(self.settings.sources)
         self.stored_credential_key = self.settings.credential_key
 
@@ -1183,6 +1220,7 @@ class DeckShareApp(ttk.Frame):
         self.password_var = tk.StringVar(value="")
         self.save_password_var = tk.BooleanVar(value=self.settings.save_password)
         self.status_var = tk.StringVar(value=self.tr("status_ready"))
+        self.total_eta_var = tk.StringVar(value=self.tr("progress_total_eta", eta="--"))
         self.runner = SftpRunner(self.messages, self.cancel_event, self.make_translator(self.settings.language))
 
         self._configure_root()
@@ -1209,6 +1247,8 @@ class DeckShareApp(ttk.Frame):
         self.columnconfigure(0, weight=2)
         self.columnconfigure(1, weight=3)
         self.rowconfigure(2, weight=1)
+        self.rowconfigure(3, weight=1)
+        self.rowconfigure(4, weight=1)
 
         style = ttk.Style()
         if "vista" in style.theme_names():
@@ -1406,12 +1446,39 @@ class DeckShareApp(ttk.Frame):
             pady=(0, 12),
         )
 
+        self.progress_box = ttk.LabelFrame(self, text=self.tr("group_progress"))
+        self.progress_box.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
+        self.progress_box.columnconfigure(0, weight=1)
+        self.progress_box.rowconfigure(1, weight=1)
+        self.localized_widgets.append((self.progress_box, "group_progress"))
+        self.total_eta_label = ttk.Label(self.progress_box, textvariable=self.total_eta_var)
+        self.total_eta_label.grid(row=0, column=0, sticky="w", padx=12, pady=(10, 6))
+
+        progress_columns = ("file", "destination", "speed", "percent", "eta")
+        self.progress_table = ttk.Treeview(
+            self.progress_box,
+            columns=progress_columns,
+            show="headings",
+            height=5,
+        )
+        self.progress_table.grid(row=1, column=0, sticky="nsew", padx=(12, 0), pady=(0, 12))
+        progress_scroll_y = ttk.Scrollbar(self.progress_box, orient="vertical", command=self.progress_table.yview)
+        progress_scroll_y.grid(row=1, column=1, sticky="ns", padx=(0, 12), pady=(0, 12))
+        progress_scroll_x = ttk.Scrollbar(self.progress_box, orient="horizontal", command=self.progress_table.xview)
+        progress_scroll_x.grid(row=2, column=0, sticky="ew", padx=(12, 0), pady=(0, 12))
+        self.progress_table.configure(yscrollcommand=progress_scroll_y.set, xscrollcommand=progress_scroll_x.set)
+        self.progress_table.column("file", width=220, minwidth=120, stretch=True, anchor="w")
+        self.progress_table.column("destination", width=300, minwidth=160, stretch=True, anchor="w")
+        self.progress_table.column("speed", width=110, minwidth=80, stretch=True, anchor="e")
+        self.progress_table.column("percent", width=90, minwidth=70, stretch=True, anchor="e")
+        self.progress_table.column("eta", width=90, minwidth=70, stretch=True, anchor="e")
+        self.configure_progress_table_headings()
+
         self.log_box = ttk.LabelFrame(self, text=self.tr("group_log"))
-        self.log_box.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
+        self.log_box.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
         self.log_box.columnconfigure(0, weight=1)
         self.log_box.rowconfigure(0, weight=1)
         self.localized_widgets.append((self.log_box, "group_log"))
-        self.rowconfigure(3, weight=1)
 
         self.log_text = tk.Text(self.log_box, height=10, wrap="word", state="disabled")
         self.log_text.grid(row=0, column=0, sticky="nsew", padx=(12, 0), pady=12)
@@ -1429,9 +1496,50 @@ class DeckShareApp(ttk.Frame):
         self.localized_widgets.append((label, label_key))
         ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, sticky="ew", padx=12, pady=6)
 
+    def configure_progress_table_headings(self) -> None:
+        self.progress_table.heading("file", text=self.tr("progress_column_file"))
+        self.progress_table.heading("destination", text=self.tr("progress_column_destination"))
+        self.progress_table.heading("speed", text=self.tr("progress_column_speed"))
+        self.progress_table.heading("percent", text=self.tr("progress_column_percent"))
+        self.progress_table.heading("eta", text=self.tr("progress_column_eta"))
+
+    def reset_progress_table(self) -> None:
+        self.progress_rows.clear()
+        self.current_total_eta = "--"
+        self.total_eta_var.set(self.tr("progress_total_eta", eta="--"))
+        for item_id in self.progress_table.get_children():
+            self.progress_table.delete(item_id)
+
+    def update_progress_table(self, progress: ProgressUpdate) -> None:
+        values = (
+            progress.file_name,
+            progress.destination,
+            progress.speed,
+            progress.percent,
+            progress.file_eta,
+        )
+        if progress.task_id in self.progress_rows:
+            self.progress_table.item(progress.task_id, values=values)
+        else:
+            self.progress_table.insert("", "end", iid=progress.task_id, values=values)
+            self.progress_rows[progress.task_id] = progress.task_id
+        self.current_total_eta = progress.total_eta
+        self.total_eta_var.set(self.tr("progress_total_eta", eta=progress.total_eta))
+
+    def remove_progress_row(self, progress: ProgressRemove) -> None:
+        if progress.task_id in self.progress_rows:
+            self.progress_rows.pop(progress.task_id, None)
+            if self.progress_table.exists(progress.task_id):
+                self.progress_table.delete(progress.task_id)
+        if not self.progress_rows:
+            self.current_total_eta = "--"
+            self.total_eta_var.set(self.tr("progress_total_eta", eta="--"))
+
     def apply_language(self) -> None:
         for widget, key in self.localized_widgets:
             widget.configure(text=self.tr(key))
+        self.configure_progress_table_headings()
+        self.total_eta_var.set(self.tr("progress_total_eta", eta=self.current_total_eta))
         self.update_auth_fields()
         if self.status_var.get() in {
             TRANSLATIONS[LANG_RU]["status_ready"],
@@ -1714,6 +1822,7 @@ class DeckShareApp(ttk.Frame):
 
         self.cancel_event.clear()
         self.status_var.set(status)
+        self.reset_progress_table()
         self.stop_button.configure(state="normal")
         self.progress.start(10)
         tr = self.make_translator(self.language_var.get())
@@ -1740,12 +1849,15 @@ class DeckShareApp(ttk.Frame):
                 if level == "done":
                     self.stop_button.configure(state="disabled")
                     self.progress.stop()
-                    self.status_var.set(text)
+                    self.status_var.set(str(text))
                 elif level == "progress":
-                    self.status_var.set(text)
-                    self.append_log("output", text)
+                    if isinstance(text, ProgressUpdate):
+                        self.update_progress_table(text)
+                elif level == "progress_remove":
+                    if isinstance(text, ProgressRemove):
+                        self.remove_progress_row(text)
                 else:
-                    self.append_log(level, text)
+                    self.append_log(level, str(text))
         except queue.Empty:
             pass
 

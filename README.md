@@ -46,6 +46,6 @@ Add Windows directories, choose a Deck destination for each selected folder, che
 - `Parallel files` controls how many files can upload at the same time. Start with `1` or `2`; higher values can help many small files but may hurt Steam Deck microSD writes.
 - Existing final files are skipped when size matches. New or changed files are uploaded to a temporary `.deckshare-part` file, verified with SHA-256, then used to replace the final file.
 - If transfer is stopped during a file upload, DeckShare tries to remove the current `.deckshare-part` file automatically.
-- During upload, the log shows the active file, per-file percentage, current average speed, ETA for the current file, and ETA for all remaining upload bytes.
+- During upload, the progress table shows every active file, destination folder, speed, percentage, and per-file ETA. Total ETA is shown above the table and is based on aggregate transfer speed.
 - Extra files already present on the Steam Deck are not deleted.
 - If `steamdeck.local` does not resolve on Windows, use the Steam Deck IP address shown in network settings. Bonjour/mDNS support can also make `.local` names work on Windows.
