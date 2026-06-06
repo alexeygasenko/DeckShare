@@ -83,8 +83,22 @@
             <GroupBox x:Name="SourcesGroup" Grid.Column="2">
                 <Grid Margin="10">
                     <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <DataGrid x:Name="SourcesGrid" AutoGenerateColumns="False" CanUserAddRows="False" SelectionMode="Extended">
+                    <DataGrid x:Name="SourcesGrid" AutoGenerateColumns="False" CanUserAddRows="False"
+                              SelectionMode="Extended" CurrentCellChanged="SourcesGrid_CurrentCellChanged">
+                        <DataGrid.RowStyle>
+                            <Style TargetType="DataGridRow">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsMuted}" Value="True">
+                                        <Setter Property="Background" Value="#FFF4D6"/>
+                                        <Setter Property="Foreground" Value="#6B5A24"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </DataGrid.RowStyle>
                         <DataGrid.Columns>
+                            <DataGridCheckBoxColumn x:Name="MutedColumn"
+                                                    Binding="{Binding IsMuted, UpdateSourceTrigger=PropertyChanged}"
+                                                    Width="75"/>
                             <DataGridTextColumn x:Name="LocalPathColumn" Binding="{Binding LocalPath}" Width="2*" IsReadOnly="True"/>
                             <DataGridTextColumn x:Name="RemotePathColumn" Binding="{Binding RemotePath, UpdateSourceTrigger=PropertyChanged}" Width="2*"/>
                         </DataGrid.Columns>

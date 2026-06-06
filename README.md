@@ -41,6 +41,7 @@ Add Windows folders, choose a separate Deck destination for each folder, check S
 - New or changed files upload as `.deckshare-part`, are verified with SHA-256, then replace the final file.
 - Temporary files are removed after transfer errors or cancellation when the Deck remains reachable.
 - Each Windows source folder can use its own destination on the Steam Deck.
+- Source folders can be muted without removing them; muted folders are highlighted and excluded from transfers.
 
 Settings are saved in `%APPDATA%\DeckShare\config.json`. Passwords are never stored in that file.
 

@@ -124,6 +124,11 @@ public sealed class TransferService
         foreach (var source in _settings.Sources)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (source.IsMuted)
+            {
+                Log("info", "mutedFolder", source.LocalPath);
+                continue;
+            }
             if (!Directory.Exists(source.LocalPath)) throw new DirectoryNotFoundException(T("missingFolder", source.LocalPath));
             var remoteRoot = NormalizeRemotePath(source.RemotePath);
             EnsureRemoteDirectory(client, remoteRoot);

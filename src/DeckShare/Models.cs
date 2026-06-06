@@ -9,6 +9,7 @@ public sealed class TransferSource : INotifyPropertyChanged
 {
     private string _localPath = "";
     private string _remotePath = "/home/deck/DeckShare";
+    private bool _isMuted;
 
     [JsonPropertyName("local_path")]
     public string LocalPath
@@ -24,9 +25,23 @@ public sealed class TransferSource : INotifyPropertyChanged
         set => SetField(ref _remotePath, value);
     }
 
+    [JsonPropertyName("muted")]
+    public bool IsMuted
+    {
+        get => _isMuted;
+        set => SetField(ref _isMuted, value);
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private void SetField(ref string field, string value, [CallerMemberName] string? propertyName = null)
+    {
+        if (field == value) return;
+        field = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+
+    private void SetField(ref bool field, bool value, [CallerMemberName] string? propertyName = null)
     {
         if (field == value) return;
         field = value;

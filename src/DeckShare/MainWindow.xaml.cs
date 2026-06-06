@@ -112,6 +112,7 @@ public partial class MainWindow : Window
         IdentityBrowseButton.Content = T("browse");
         ParallelLabel.Text = T("parallel");
         SourcesGroup.Header = T("sources");
+        MutedColumn.Header = T("muted");
         LocalPathColumn.Header = T("localFolder");
         RemotePathColumn.Header = T("remoteFolder");
         AddButton.Content = T("add");
@@ -167,6 +168,13 @@ public partial class MainWindow : Window
     private void RemoveButton_Click(object sender, RoutedEventArgs e)
     {
         foreach (var source in SourcesGrid.SelectedItems.Cast<TransferSource>().ToList()) _settings.Sources.Remove(source);
+        SaveSettings();
+    }
+
+    private void SourcesGrid_CurrentCellChanged(object sender, EventArgs e)
+    {
+        if (_loading) return;
+        SourcesGrid.CommitEdit(DataGridEditingUnit.Row, true);
         SaveSettings();
     }
 
