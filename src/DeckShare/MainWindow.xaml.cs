@@ -14,6 +14,7 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _cancellation;
     private bool _loading = true;
     private string _totalEta = "--";
+    private string _totalSpeed = "--";
 
     public MainWindow()
     {
@@ -125,6 +126,7 @@ public partial class MainWindow : Window
         PercentColumn.Header = T("percent");
         EtaColumn.Header = T("fileEta");
         TotalEtaText.Text = T("totalEta", _totalEta);
+        TotalSpeedText.Text = T("totalSpeed", _totalSpeed);
         LogGroup.Header = T("log");
         if (!IsBusy()) StatusText.Text = T("ready");
     }
@@ -196,7 +198,9 @@ public partial class MainWindow : Window
         SaveSettings();
         _progressRows.Clear();
         _totalEta = "--";
+        _totalSpeed = "--";
         TotalEtaText.Text = T("totalEta", _totalEta);
+        TotalSpeedText.Text = T("totalSpeed", _totalSpeed);
         _cancellation = new CancellationTokenSource();
         return true;
     }
@@ -266,7 +270,9 @@ public partial class MainWindow : Window
             row.Percent = update.Percent;
             row.Eta = update.FileEta;
             _totalEta = update.TotalEta;
+            _totalSpeed = update.TotalSpeed;
             TotalEtaText.Text = T("totalEta", _totalEta);
+            TotalSpeedText.Text = T("totalSpeed", _totalSpeed);
         });
     }
 
@@ -279,7 +285,9 @@ public partial class MainWindow : Window
             if (_progressRows.Count == 0)
             {
                 _totalEta = "--";
+                _totalSpeed = "--";
                 TotalEtaText.Text = T("totalEta", _totalEta);
+                TotalSpeedText.Text = T("totalSpeed", _totalSpeed);
             }
         });
     }

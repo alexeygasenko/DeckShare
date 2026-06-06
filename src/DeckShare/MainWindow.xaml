@@ -106,7 +106,11 @@
         <GroupBox x:Name="ProgressGroup" Grid.Row="3">
             <Grid Margin="10">
                 <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                <TextBlock x:Name="TotalEtaText" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <TextBlock x:Name="TotalEtaText" FontWeight="SemiBold"/>
+                    <TextBlock Text="  ·  " Foreground="#777"/>
+                    <TextBlock x:Name="TotalSpeedText" FontWeight="SemiBold"/>
+                </StackPanel>
                 <DataGrid x:Name="ProgressGrid" Grid.Row="1" AutoGenerateColumns="False" CanUserAddRows="False" IsReadOnly="True">
                     <DataGrid.Columns>
                         <DataGridTextColumn x:Name="FileColumn" Binding="{Binding FileName}" Width="2*"/>

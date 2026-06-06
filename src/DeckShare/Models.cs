@@ -84,4 +84,12 @@ public sealed class ProgressRow : INotifyPropertyChanged
 }
 
 public sealed record UploadTask(string Id, string LocalPath, string RemotePath, string TempPath, long Size);
-public sealed record ProgressUpdate(string Id, string FileName, string Destination, string Speed, string Percent, string FileEta, string TotalEta);
+public sealed record ProgressUpdate(
+    string Id,
+    string FileName,
+    string Destination,
+    string Speed,
+    string Percent,
+    string FileEta,
+    string TotalEta,
+    string TotalSpeed);

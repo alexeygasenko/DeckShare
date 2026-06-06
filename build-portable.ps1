@@ -15,4 +15,8 @@ if (-not (Test-Path $dotnet)) {
     -p:DebugSymbols=false `
     --output "$PSScriptRoot\dist"
 
+if ($LASTEXITCODE -ne 0) {
+    throw "Portable build failed with exit code $LASTEXITCODE."
+}
+
 Write-Host "Portable build: $PSScriptRoot\dist\DeckShare.exe"

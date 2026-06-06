@@ -171,7 +171,7 @@ public sealed class TransferService
     {
         var seconds = Math.Max(elapsed.TotalSeconds, 0.001);
         var speed = sent / seconds;
-        var totalEta = _tracker.Update(task.Id, sent);
+        var total = _tracker.Update(task.Id, sent);
         var fileEta = speed > 0 ? (task.Size - sent) / speed : double.NaN;
         _progress(new ProgressUpdate(
             task.Id,
@@ -180,7 +180,8 @@ public sealed class TransferService
             FormatSpeed(speed),
             FormatPercent(sent, task.Size),
             FormatDuration(fileEta),
-            totalEta));
+            total.Eta,
+            total.Speed));
     }
 
     private SftpClient CreateSftpClient() => new(CreateConnectionInfo());
@@ -287,14 +288,16 @@ public sealed class TransferService
             _watch = Stopwatch.StartNew();
         }
 
-        public string Update(string id, long bytes)
+        public (string Eta, string Speed) Update(string id, long bytes)
         {
             _active[id] = bytes;
             lock (_sync)
             {
                 var sent = _completed + _active.Values.Sum();
                 var speed = sent / Math.Max(_watch.Elapsed.TotalSeconds, 0.001);
-                return FormatDuration(speed > 0 ? Math.Max(_total - sent, 0) / speed : double.NaN);
+                return (
+                    FormatDuration(speed > 0 ? Math.Max(_total - sent, 0) / speed : double.NaN),
+                    FormatSpeed(speed));
             }
         }
 

@@ -29,8 +29,8 @@ Add Windows folders, choose a separate Deck destination for each folder, check S
 - Password or private SSH key authentication.
 - Optional secure password storage in Windows Credential Manager.
 - Configurable parallel file transfers.
-- Resizable progress table showing every active file, destination, speed, percentage, and file ETA.
-- Total ETA based on aggregate transfer speed across active files.
+- Resizable progress table showing every active file, destination, speed, percentage, and time left.
+- Total ETA and aggregate network speed across all active transfers.
 - Existing final files are skipped when their size matches.
 - New or changed files upload as `.deckshare-part`, are verified with SHA-256, then replace the final file.
 - Temporary files are removed after transfer errors or cancellation when the Deck remains reachable.
