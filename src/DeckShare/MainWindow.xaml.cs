@@ -122,6 +122,7 @@ public partial class MainWindow : Window
         ProgressGroup.Header = T("progress");
         FileColumn.Header = T("file");
         DestinationColumn.Header = T("destination");
+        PhaseColumn.Header = T("phase");
         SpeedColumn.Header = T("speed");
         PercentColumn.Header = T("percent");
         EtaColumn.Header = T("fileEta");
@@ -269,6 +270,7 @@ public partial class MainWindow : Window
             }
             row.FileName = update.FileName;
             row.Destination = update.Destination;
+            row.Phase = update.Phase;
             row.Speed = update.Speed;
             row.Percent = update.Percent;
             row.Eta = update.FileEta;
@@ -287,6 +289,7 @@ public partial class MainWindow : Window
             if (row is null) return;
             row.Percent = "100.0%";
             row.Eta = "0:00";
+            row.Phase = T("phaseCompleted");
             row.IsCompleted = true;
             var index = _progressRows.IndexOf(row);
             if (index >= 0 && index != _progressRows.Count - 1) _progressRows.Move(index, _progressRows.Count - 1);

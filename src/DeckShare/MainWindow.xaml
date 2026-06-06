@@ -125,6 +125,7 @@
                     <DataGrid.Columns>
                         <DataGridTextColumn x:Name="FileColumn" Binding="{Binding FileName}" Width="2*"/>
                         <DataGridTextColumn x:Name="DestinationColumn" Binding="{Binding Destination}" Width="3*"/>
+                        <DataGridTextColumn x:Name="PhaseColumn" Binding="{Binding Phase}" Width="105"/>
                         <DataGridTextColumn x:Name="SpeedColumn" Binding="{Binding Speed}" Width="110"/>
                         <DataGridTextColumn x:Name="PercentColumn" Binding="{Binding Percent}" Width="90"/>
                         <DataGridTextColumn x:Name="EtaColumn" Binding="{Binding Eta}" Width="90"/>

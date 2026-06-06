@@ -31,6 +31,7 @@ Add Windows folders, choose a separate Deck destination for each folder, check S
 - Configurable parallel file transfers.
 - Resizable progress table showing every active file, destination, speed, percentage, and time left.
 - Completed files remain in the progress table, are highlighted in green, and move below active transfers.
+- Remote SHA-256 verification uses an automatically deployed helper and reports its real phase, percentage, speed, and time left.
 - Total ETA and aggregate network speed across all active transfers.
 - Existing final files are skipped when their size matches.
 - New or changed files upload as `.deckshare-part`, are verified with SHA-256, then replace the final file.

@@ -62,6 +62,7 @@ public sealed class ProgressRow : INotifyPropertyChanged
 {
     private string _fileName = "";
     private string _destination = "";
+    private string _phase = "";
     private string _speed = "";
     private string _percent = "";
     private string _eta = "";
@@ -70,6 +71,7 @@ public sealed class ProgressRow : INotifyPropertyChanged
     public required string Id { get; init; }
     public string FileName { get => _fileName; set => SetField(ref _fileName, value); }
     public string Destination { get => _destination; set => SetField(ref _destination, value); }
+    public string Phase { get => _phase; set => SetField(ref _phase, value); }
     public string Speed { get => _speed; set => SetField(ref _speed, value); }
     public string Percent { get => _percent; set => SetField(ref _percent, value); }
     public string Eta { get => _eta; set => SetField(ref _eta, value); }
@@ -97,6 +99,7 @@ public sealed record ProgressUpdate(
     string Id,
     string FileName,
     string Destination,
+    string Phase,
     string Speed,
     string Percent,
     string FileEta,
