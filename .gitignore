@@ -1,7 +1,9 @@
-__pycache__/
 .deckshare/
 .deps/
-*.py[cod]
-*.spec
+__pycache__/
 build/
 dist/
+.dotnet/
+.dotnet-install.ps1
+**/bin/
+**/obj/

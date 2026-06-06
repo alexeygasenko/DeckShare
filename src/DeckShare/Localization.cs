@@ -1,0 +1,115 @@
+namespace DeckShare;
+
+public static class Localization
+{
+    private static readonly Dictionary<string, Dictionary<string, string>> Texts = new()
+    {
+        ["ru"] = new()
+        {
+            ["title"] = "DeckShare",
+            ["connection"] = "Steam Deck",
+            ["host"] = "Хост",
+            ["port"] = "Порт",
+            ["user"] = "Пользователь",
+            ["defaultPath"] = "Путь на Deck по умолчанию",
+            ["auth"] = "Вход",
+            ["password"] = "Пароль",
+            ["key"] = "SSH-ключ",
+            ["savePassword"] = "Сохранить пароль безопасно",
+            ["identity"] = "Файл SSH-ключа",
+            ["parallel"] = "Параллельных файлов",
+            ["sources"] = "Директории Windows",
+            ["localFolder"] = "Папка Windows",
+            ["remoteFolder"] = "Папка назначения на Deck",
+            ["add"] = "Добавить",
+            ["remove"] = "Удалить",
+            ["test"] = "Проверить SSH",
+            ["transfer"] = "Передать",
+            ["stop"] = "Остановить",
+            ["progress"] = "Прогресс",
+            ["file"] = "Файл",
+            ["destination"] = "Папка назначения",
+            ["speed"] = "Скорость",
+            ["percent"] = "Процент",
+            ["fileEta"] = "ETA файла",
+            ["totalEta"] = "Осталось всего: {0}",
+            ["log"] = "Журнал",
+            ["ready"] = "Готово",
+            ["testing"] = "Проверяю SSH...",
+            ["transferring"] = "Передаю файлы...",
+            ["stopping"] = "Останавливаю...",
+            ["connectionOk"] = "SSH-соединение работает.",
+            ["noSources"] = "Добавьте хотя бы одну директорию.",
+            ["missingFolder"] = "Папка недоступна: {0}",
+            ["invalidSettings"] = "Проверьте хост, пользователя и порт.",
+            ["keyRequired"] = "Выберите существующий файл SSH-ключа.",
+            ["passwordRequired"] = "Введите пароль Steam Deck.",
+            ["connecting"] = "Подключаюсь к {0}@{1}:{2}",
+            ["processing"] = "Обрабатываю папку: {0}",
+            ["skipped"] = "Пропущен, размер совпадает: {0}",
+            ["verifying"] = "Проверяю временный файл: {0}",
+            ["uploaded"] = "Отправлен: {0} - {1}",
+            ["complete"] = "Передача завершена. Отправлено: {0}, пропущено: {1}.",
+            ["stopped"] = "Передача остановлена.",
+            ["error"] = "Ошибка: {0}",
+            ["browse"] = "Обзор..."
+        },
+        ["en"] = new()
+        {
+            ["title"] = "DeckShare",
+            ["connection"] = "Steam Deck",
+            ["host"] = "Host",
+            ["port"] = "Port",
+            ["user"] = "User",
+            ["defaultPath"] = "Default Deck path",
+            ["auth"] = "Login",
+            ["password"] = "Password",
+            ["key"] = "SSH key",
+            ["savePassword"] = "Save password securely",
+            ["identity"] = "SSH key file",
+            ["parallel"] = "Parallel files",
+            ["sources"] = "Windows directories",
+            ["localFolder"] = "Windows folder",
+            ["remoteFolder"] = "Deck destination folder",
+            ["add"] = "Add",
+            ["remove"] = "Remove",
+            ["test"] = "Check SSH",
+            ["transfer"] = "Transfer",
+            ["stop"] = "Stop",
+            ["progress"] = "Progress",
+            ["file"] = "File",
+            ["destination"] = "Destination folder",
+            ["speed"] = "Speed",
+            ["percent"] = "Percent",
+            ["fileEta"] = "File ETA",
+            ["totalEta"] = "Total ETA: {0}",
+            ["log"] = "Log",
+            ["ready"] = "Ready",
+            ["testing"] = "Checking SSH...",
+            ["transferring"] = "Transferring files...",
+            ["stopping"] = "Stopping...",
+            ["connectionOk"] = "SSH connection works.",
+            ["noSources"] = "Add at least one directory.",
+            ["missingFolder"] = "Folder is not available: {0}",
+            ["invalidSettings"] = "Check the host, user, and port.",
+            ["keyRequired"] = "Choose an existing SSH key file.",
+            ["passwordRequired"] = "Enter the Steam Deck password.",
+            ["connecting"] = "Connecting to {0}@{1}:{2}",
+            ["processing"] = "Processing folder: {0}",
+            ["skipped"] = "Skipped, size matches: {0}",
+            ["verifying"] = "Verifying temporary file: {0}",
+            ["uploaded"] = "Uploaded: {0} - {1}",
+            ["complete"] = "Transfer complete. Uploaded: {0}, skipped: {1}.",
+            ["stopped"] = "Transfer stopped.",
+            ["error"] = "Error: {0}",
+            ["browse"] = "Browse..."
+        }
+    };
+
+    public static string Get(string language, string key, params object[] args)
+    {
+        var selected = Texts.TryGetValue(language, out var bundle) ? bundle : Texts["ru"];
+        var text = selected.TryGetValue(key, out var value) ? value : key;
+        return args.Length == 0 ? text : string.Format(text, args);
+    }
+}

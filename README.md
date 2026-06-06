@@ -1,14 +1,12 @@
 # DeckShare
 
-DeckShare is a small Windows desktop utility for copying selected folders to a Steam Deck over SSH/SFTP.
+DeckShare is a portable Windows desktop application for copying selected folders to a Steam Deck over SSH/SFTP.
 
-## Requirements
+## Download and run
 
-- Python 3.10+.
-- Python package dependencies from `requirements.txt`.
-- SSH enabled on Steam Deck.
+Download `DeckShare.exe` from the [latest GitHub release](https://github.com/alexeygasenko/DeckShare/releases/latest) and run it. The executable is self-contained: Python and .NET do not need to be installed.
 
-On Steam Deck, enable and start SSH:
+On Steam Deck, enable SSH once:
 
 ```bash
 sudo systemctl enable --now sshd
@@ -22,30 +20,35 @@ The default connection profile is:
 - Port: `22`
 - Remote folder: `/home/deck/DeckShare`
 
-## Run
+Add Windows folders, choose a separate Deck destination for each folder, check SSH, then press **Transfer**. DeckShare copies each selected folder's contents directly into its destination without creating an extra folder with the Windows folder name.
 
-Double-click `run.bat`, or run:
+## Features
+
+- Native Windows UI written in C# and WPF.
+- Russian and English localization.
+- Password or private SSH key authentication.
+- Optional secure password storage in Windows Credential Manager.
+- Configurable parallel file transfers.
+- Resizable progress table showing every active file, destination, speed, percentage, and file ETA.
+- Total ETA based on aggregate transfer speed across active files.
+- Existing final files are skipped when their size matches.
+- New or changed files upload as `.deckshare-part`, are verified with SHA-256, then replace the final file.
+- Temporary files are removed after transfer errors or cancellation when the Deck remains reachable.
+- Each Windows source folder can use its own destination on the Steam Deck.
+
+Settings are saved in `%APPDATA%\DeckShare\config.json`. Passwords are never stored in that file.
+
+## Build portable EXE
+
+Requirements:
+
+- Windows
+- .NET 8 SDK
+
+Run:
 
 ```powershell
-python -m pip install --target .deps -r requirements.txt
-python deckshare.py
+.\build-portable.ps1
 ```
 
-You can also double-click `install_requirements.bat` once, then use `run.bat`.
-
-Add Windows directories, choose a Deck destination for each selected folder, check SSH, then press **Transfer**. The default Deck path is used for newly added folders, but every folder can be pointed to its own Deck directory. DeckShare copies the contents of each selected Windows folder into its Deck destination; it does not create an extra remote folder with the Windows folder name. Settings are saved in `%APPDATA%\DeckShare\config.json`. If that location is not writable, DeckShare falls back to `.deckshare\config.json` next to the app.
-
-## Notes
-
-- The UI supports Russian and English. Use the language selector in the top-right corner.
-- Login can use either the Steam Deck user password or a private SSH key.
-- Passwords are not saved in the config file. If enabled, DeckShare stores the SSH password in the operating system credential store via `keyring`; the config only keeps a non-secret lookup key.
-- Transfer engines:
-  - `Compatible SFTP` uses Paramiko, supports password login and saved passwords, but can be slower.
-  - `Fast OpenSSH` uses Windows `ssh.exe`, is intended for SSH key/agent login, and keeps the same temporary-file verification flow.
-- `Parallel files` controls how many files can upload at the same time. Start with `1` or `2`; higher values can help many small files but may hurt Steam Deck microSD writes.
-- Existing final files are skipped when size matches. New or changed files are uploaded to a temporary `.deckshare-part` file, verified with SHA-256, then used to replace the final file.
-- If transfer is stopped during a file upload, DeckShare tries to remove the current `.deckshare-part` file automatically.
-- During upload, the progress table shows every active file, destination folder, speed, percentage, and per-file ETA. Total ETA is shown above the table and is based on aggregate transfer speed.
-- Extra files already present on the Steam Deck are not deleted.
-- If `steamdeck.local` does not resolve on Windows, use the Steam Deck IP address shown in network settings. Bonjour/mDNS support can also make `.local` names work on Windows.
+The self-contained single-file executable is written to `dist\DeckShare.exe`.
