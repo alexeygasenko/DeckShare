@@ -208,7 +208,7 @@ public partial class MainWindow : Window
     private async Task RunAsync(Func<TransferService, Task> action, string status)
     {
         SetBusy(true, status);
-        var service = new TransferService(_settings, SecretBox.Password, AppendLog, UpdateProgress, RemoveProgress);
+        var service = new TransferService(_settings, SecretBox.Password, AppendLog, UpdateProgress, CompleteProgress, RemoveProgress);
         try
         {
             await action(service);
@@ -262,7 +262,10 @@ public partial class MainWindow : Window
             if (row is null)
             {
                 row = new ProgressRow { Id = update.Id };
-                _progressRows.Add(row);
+                var firstCompleted = _progressRows.Select((item, index) => (item, index))
+                    .FirstOrDefault(entry => entry.item.IsCompleted);
+                if (firstCompleted.item is null) _progressRows.Add(row);
+                else _progressRows.Insert(firstCompleted.index, row);
             }
             row.FileName = update.FileName;
             row.Destination = update.Destination;
@@ -276,13 +279,32 @@ public partial class MainWindow : Window
         });
     }
 
+    private void CompleteProgress(string id)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            var row = _progressRows.FirstOrDefault(item => item.Id == id);
+            if (row is null) return;
+            row.Percent = "100.0%";
+            row.Eta = "0:00";
+            row.IsCompleted = true;
+            var index = _progressRows.IndexOf(row);
+            if (index >= 0 && index != _progressRows.Count - 1) _progressRows.Move(index, _progressRows.Count - 1);
+            if (_progressRows.All(item => item.IsCompleted))
+            {
+                _totalEta = "0:00";
+                TotalEtaText.Text = T("totalEta", _totalEta);
+            }
+        });
+    }
+
     private void RemoveProgress(string id)
     {
         Dispatcher.Invoke(() =>
         {
             var row = _progressRows.FirstOrDefault(item => item.Id == id);
             if (row is not null) _progressRows.Remove(row);
-            if (_progressRows.Count == 0)
+            if (_progressRows.All(item => item.IsCompleted))
             {
                 _totalEta = "--";
                 _totalSpeed = "--";

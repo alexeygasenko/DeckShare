@@ -65,6 +65,7 @@ public sealed class ProgressRow : INotifyPropertyChanged
     private string _speed = "";
     private string _percent = "";
     private string _eta = "";
+    private bool _isCompleted;
 
     public required string Id { get; init; }
     public string FileName { get => _fileName; set => SetField(ref _fileName, value); }
@@ -72,10 +73,18 @@ public sealed class ProgressRow : INotifyPropertyChanged
     public string Speed { get => _speed; set => SetField(ref _speed, value); }
     public string Percent { get => _percent; set => SetField(ref _percent, value); }
     public string Eta { get => _eta; set => SetField(ref _eta, value); }
+    public bool IsCompleted { get => _isCompleted; set => SetField(ref _isCompleted, value); }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private void SetField(ref string field, string value, [CallerMemberName] string? propertyName = null)
+    {
+        if (field == value) return;
+        field = value;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
+
+    private void SetField(ref bool field, bool value, [CallerMemberName] string? propertyName = null)
     {
         if (field == value) return;
         field = value;

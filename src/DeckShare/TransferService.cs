@@ -14,6 +14,7 @@ public sealed class TransferService
     private readonly string _language;
     private readonly Action<string, string> _log;
     private readonly Action<ProgressUpdate> _progress;
+    private readonly Action<string> _completeProgress;
     private readonly Action<string> _removeProgress;
     private readonly ProgressTracker _tracker = new();
 
@@ -22,6 +23,7 @@ public sealed class TransferService
         string secret,
         Action<string, string> log,
         Action<ProgressUpdate> progress,
+        Action<string> completeProgress,
         Action<string> removeProgress)
     {
         _settings = settings;
@@ -29,6 +31,7 @@ public sealed class TransferService
         _language = settings.Language;
         _log = log;
         _progress = progress;
+        _completeProgress = completeProgress;
         _removeProgress = removeProgress;
     }
 
@@ -149,7 +152,7 @@ public sealed class TransferService
                 cancellationToken.ThrowIfCancellationRequested();
                 RunChecked(ssh, $"mv -f -- {Quote(task.TempPath)} {Quote(task.RemotePath)}");
                 _tracker.Complete(task.Id, task.Size);
-                _removeProgress(task.Id);
+                _completeProgress(task.Id);
                 Log("output", "uploaded", task.RemotePath, FormatSpeed(task.Size / Math.Max(started.Elapsed.TotalSeconds, 0.001)));
             }
             catch

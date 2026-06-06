@@ -112,6 +112,16 @@
                     <TextBlock x:Name="TotalSpeedText" FontWeight="SemiBold"/>
                 </StackPanel>
                 <DataGrid x:Name="ProgressGrid" Grid.Row="1" AutoGenerateColumns="False" CanUserAddRows="False" IsReadOnly="True">
+                    <DataGrid.RowStyle>
+                        <Style TargetType="DataGridRow">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsCompleted}" Value="True">
+                                    <Setter Property="Background" Value="#E6F4EA"/>
+                                    <Setter Property="Foreground" Value="#146C2E"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </DataGrid.RowStyle>
                     <DataGrid.Columns>
                         <DataGridTextColumn x:Name="FileColumn" Binding="{Binding FileName}" Width="2*"/>
                         <DataGridTextColumn x:Name="DestinationColumn" Binding="{Binding Destination}" Width="3*"/>
