@@ -8,11 +8,16 @@
     <Nullable>enable</Nullable>
     <AssemblyName>DeckShare</AssemblyName>
     <RootNamespace>DeckShare</RootNamespace>
-    <Version>1.0.3</Version>
+    <Version>1.0.4</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\..\assets\deckshare.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="SSH.NET" Version="2025.1.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="..\..\assets\deckshare-logo.png" Link="Assets\deckshare-logo.png" />
   </ItemGroup>
 </Project>

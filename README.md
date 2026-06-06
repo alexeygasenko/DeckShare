@@ -1,5 +1,9 @@
 # DeckShare
 
+<p align="center">
+  <img src="assets/deckshare-logo.png" width="280" alt="DeckShare logo">
+</p>
+
 DeckShare is a portable Windows desktop application for copying selected folders to a Steam Deck over SSH/SFTP.
 
 ## Download and run
